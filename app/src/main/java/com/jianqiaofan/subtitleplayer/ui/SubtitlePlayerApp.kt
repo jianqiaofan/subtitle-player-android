@@ -6,6 +6,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -15,6 +16,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.jianqiaofan.subtitleplayer.data.AppPreferences
+import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.ui.edit.EditSubtitleScreen
 import com.jianqiaofan.subtitleplayer.ui.library.LibraryScreen
 import com.jianqiaofan.subtitleplayer.ui.player.PlayerScreen
@@ -36,6 +39,13 @@ object Routes {
 @Composable
 fun SubtitlePlayerApp() {
     val navController = rememberNavController()
+    val app = LocalContext.current.applicationContext as Application
+    val prefs = remember { AppPreferences(app) }
+    val displaySettings by prefs.displaySettings.collectAsStateWithLifecycle(
+        initialValue = PlayerDisplaySettings(),
+    )
+    ApplyPreferredOrientation(displaySettings.preferredOrientation)
+
     Surface(modifier = Modifier.fillMaxSize(), color = WindowBackground) {
         NavHost(navController = navController, startDestination = Routes.Library) {
             composable(Routes.Library) {

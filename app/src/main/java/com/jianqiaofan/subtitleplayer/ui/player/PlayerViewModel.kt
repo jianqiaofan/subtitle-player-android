@@ -11,11 +11,13 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
 import com.jianqiaofan.subtitleplayer.data.MediaLibrary
 import com.jianqiaofan.subtitleplayer.data.SubtitleDocuments
+import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleTrack
 import com.jianqiaofan.subtitleplayer.domain.model.isAudioFile
@@ -54,6 +56,9 @@ data class PlayerUiState(
     val countdownLabel: String = "倒计时",
     val countdownActive: Boolean = false,
     val writable: Boolean = true,
+    val videoWidth: Int = 0,
+    val videoHeight: Int = 0,
+    val displaySettings: PlayerDisplaySettings = PlayerDisplaySettings(),
     val message: String? = null,
     val playError: String? = null,
 )
@@ -96,6 +101,12 @@ class PlayerViewModel(
                 }
             }
 
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                _state.update {
+                    it.copy(videoWidth = videoSize.width, videoHeight = videoSize.height)
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 val cause = error.cause?.message ?: error.message ?: "不支持的封装或编码"
                 _state.update {
@@ -116,6 +127,11 @@ class PlayerViewModel(
     init {
         viewModelScope.launch { preparePlayback() }
         viewModelScope.launch {
+            prefs.displaySettings.collect { settings ->
+                _state.update { it.copy(displaySettings = settings) }
+            }
+        }
+        viewModelScope.launch {
             while (isActive) {
                 val pos = player.currentPosition.coerceAtLeast(0L)
                 val dur = player.duration.takeIf { it > 0 } ?: _state.value.durationMs
@@ -127,6 +143,16 @@ class PlayerViewModel(
                 delay(80)
             }
         }
+    }
+
+    fun updateDisplaySettings(transform: (PlayerDisplaySettings) -> PlayerDisplaySettings) {
+        viewModelScope.launch {
+            prefs.updateDisplaySettings(transform)
+        }
+    }
+
+    fun setImmersiveListEnabled(enabled: Boolean) {
+        updateDisplaySettings { it.copy(immersiveList = enabled) }
     }
 
     fun cueLine(index: Int): String {
@@ -227,6 +253,10 @@ class PlayerViewModel(
 
     fun consumeMessage() {
         _state.update { it.copy(message = null, playError = null) }
+    }
+
+    fun showTransientMessage(text: String) {
+        _state.update { it.copy(message = text) }
     }
 
     fun saveCue(index: Int, start: Double, end: Double, text: String) {

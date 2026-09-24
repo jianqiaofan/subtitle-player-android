@@ -1,15 +1,15 @@
 package com.jianqiaofan.subtitleplayer.ui.player
 
 import android.app.Application
+import android.content.res.Configuration
 import android.view.LayoutInflater
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -21,8 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,6 +30,8 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -53,26 +54,30 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -82,16 +87,24 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.ui.PlayerView
 import com.jianqiaofan.subtitleplayer.R
+import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSideLandscape
+import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSidePortrait
+import com.jianqiaofan.subtitleplayer.domain.display.immersiveUnavailableReason
+import com.jianqiaofan.subtitleplayer.domain.display.isImmersiveListAvailable
 import com.jianqiaofan.subtitleplayer.domain.subtitle.PLAYBACK_SPEEDS
 import com.jianqiaofan.subtitleplayer.domain.subtitle.formatClock
-import com.jianqiaofan.subtitleplayer.domain.subtitle.formatCueListLine
+import com.jianqiaofan.subtitleplayer.ui.ApplyPreferredOrientation
+import com.jianqiaofan.subtitleplayer.ui.settings.OnScreenSubtitleSettingsScreen
 import com.jianqiaofan.subtitleplayer.ui.theme.AccentPurple
 import com.jianqiaofan.subtitleplayer.ui.theme.OnDarkMuted
 import com.jianqiaofan.subtitleplayer.ui.theme.SurfacePanel
 import com.jianqiaofan.subtitleplayer.ui.theme.VideoBlack
 import com.jianqiaofan.subtitleplayer.ui.theme.WindowBackground
+import com.jianqiaofan.subtitleplayer.ui.toggledFrom
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 
-private const val SideBySideMinWidthDp = 600
+private const val SubtitleFollowResumeMs = 2_000L
 
 private val VideoViewportSaver = Saver<VideoViewport, List<Float>>(
     save = { listOf(it.scale, it.offsetX, it.offsetY) },
@@ -113,15 +126,41 @@ fun PlayerScreen(
     )
     val state by viewModel.state.collectAsStateWithLifecycle()
     val configuration = LocalConfiguration.current
-    val sideBySide = configuration.screenWidthDp >= SideBySideMinWidthDp
+    val devicePortrait = configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
+    val sideBySide = !devicePortrait
+    val display = state.displaySettings
+
+    ApplyPreferredOrientation(display.preferredOrientation)
+
+    val immersiveAvailable = isImmersiveListAvailable(
+        state.videoWidth,
+        state.videoHeight,
+        devicePortrait,
+    )
+    val immersiveActive = display.immersiveList && immersiveAvailable
+    val immersiveReason = immersiveUnavailableReason(
+        state.videoWidth,
+        state.videoHeight,
+        devicePortrait,
+    )
+
+    LaunchedEffect(display.immersiveList, immersiveAvailable) {
+        if (display.immersiveList && !immersiveAvailable) {
+            viewModel.setImmersiveListEnabled(false)
+            immersiveReason?.let { viewModel.showTransientMessage(it) }
+        }
+    }
+
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var splitFraction by rememberSaveable { mutableFloatStateOf(if (sideBySide) 0.58f else 0.60f) }
     var subtitleMenu by remember { mutableStateOf(false) }
     var speedMenu by remember { mutableStateOf(false) }
     var showCountdown by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var menuIndex by remember { mutableStateOf<Int?>(null) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIndices by remember { mutableStateOf(setOf<Int>()) }
     val snackbar = remember { SnackbarHostState() }
-    val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -148,20 +187,95 @@ fun PlayerScreen(
         }
     }
 
-    val userScrolling = listState.isScrollInProgress
-    var pauseFollow by remember { mutableStateOf(false) }
-    LaunchedEffect(userScrolling) {
-        if (userScrolling) pauseFollow = true
-        else {
-            kotlinx.coroutines.delay(200)
-            pauseFollow = false
+    var followPaused by remember { mutableStateOf(false) }
+    val userScrollGeneration = remember { mutableIntStateOf(0) }
+    val userScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                    userScrollGeneration.intValue += 1
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (available.y != 0f) {
+                    userScrollGeneration.intValue += 1
+                }
+                return Velocity.Zero
+            }
         }
     }
-    LaunchedEffect(state.currentCueIndex, pauseFollow) {
-        if (!pauseFollow && state.currentCueIndex >= 0) {
-            val target = (state.currentCueIndex - 2).coerceAtLeast(0)
-            listState.animateScrollToItem(target)
+    LaunchedEffect(userScrollGeneration.intValue) {
+        if (userScrollGeneration.intValue == 0) return@LaunchedEffect
+        followPaused = true
+        delay(50)
+        snapshotFlow { listState.isScrollInProgress }.first { !it }
+        delay(SubtitleFollowResumeMs)
+        followPaused = false
+    }
+    LaunchedEffect(state.currentCueIndex, followPaused) {
+        if (!followPaused && state.currentCueIndex >= 0) {
+            listState.centerItem(state.currentCueIndex)
         }
+    }
+
+    val onscreenText = state.cues.getOrNull(state.currentCueIndex)?.text
+
+    val listContent: @Composable (Color, Boolean) -> Unit = { panelBg, showHeader ->
+        SubtitleListPane(
+            cues = state.cues,
+            currentCueIndex = state.currentCueIndex,
+            tracksEmpty = state.tracks.isEmpty(),
+            density = display.subtitleListDensity,
+            listState = listState,
+            userScrollConnection = userScrollConnection,
+            selectionMode = selectionMode,
+            selectedIndices = selectedIndices,
+            menuIndex = menuIndex,
+            onMenuIndexChange = { menuIndex = it },
+            onDensityToggle = {
+                viewModel.updateDisplaySettings {
+                    it.copy(subtitleListDensity = it.subtitleListDensity.toggled())
+                }
+            },
+            onCueClick = { index ->
+                userScrollGeneration.intValue = 0
+                followPaused = false
+                viewModel.seekToCue(index)
+            },
+            onEnterSelection = { index ->
+                selectionMode = true
+                selectedIndices = setOf(index)
+            },
+            onToggleSelection = { index ->
+                selectedIndices = if (index in selectedIndices) {
+                    selectedIndices - index
+                } else {
+                    selectedIndices + index
+                }
+            },
+            onExitSelection = {
+                selectionMode = false
+                selectedIndices = emptySet()
+            },
+            onRepeat = viewModel::startRepeat,
+            onEdit = onEdit,
+            panelBackground = panelBg,
+            showHeader = showHeader,
+        )
+    }
+
+    if (showSettings) {
+        OnScreenSubtitleSettingsScreen(
+            settings = display,
+            immersiveAvailable = immersiveAvailable,
+            immersiveUnavailableReason = immersiveReason,
+            devicePortrait = devicePortrait,
+            onChange = { next -> viewModel.updateDisplaySettings { next } },
+            onBack = { showSettings = false },
+        )
+        return
     }
 
     Scaffold(
@@ -180,6 +294,22 @@ fun PlayerScreen(
                         }
                     },
                     actions = {
+                        IconButton(
+                            onClick = {
+                                val next = display.preferredOrientation.toggledFrom(devicePortrait)
+                                viewModel.updateDisplaySettings {
+                                    it.copy(preferredOrientation = next)
+                                }
+                            },
+                        ) {
+                            Icon(
+                                Icons.Filled.ScreenRotation,
+                                contentDescription = if (devicePortrait) "切换横屏" else "切换竖屏",
+                            )
+                        }
+                        IconButton(onClick = { showSettings = true }) {
+                            Icon(Icons.Filled.Subtitles, contentDescription = "画面字幕")
+                        }
                         TextButton(onClick = { subtitleMenu = true }) {
                             Text(state.selectedTrack?.displayName ?: "未找到字幕")
                         }
@@ -226,80 +356,57 @@ fun PlayerScreen(
             }
         },
     ) { innerPadding ->
-        SplitPaneLayout(
-            modifier = Modifier.padding(innerPadding).fillMaxSize(),
-            sideBySide = sideBySide,
-            fraction = splitFraction,
-            onFractionChange = { splitFraction = it.coerceIn(0.28f, 0.75f) },
-            primary = {
-                VideoPane(
-                    player = viewModel.player,
-                    isAudio = state.isAudio,
-                    playing = state.playing,
-                    sideBySide = sideBySide,
-                    onToggleChrome = { chromeVisible = !chromeVisible },
-                    onTogglePlay = viewModel::togglePlayPause,
-                )
-            },
-            secondary = {
-                Box(Modifier.fillMaxSize().background(SurfacePanel)) {
-                    if (state.cues.isEmpty()) {
-                        Text(
-                            text = if (state.tracks.isEmpty()) "未找到字幕" else "字幕为空",
-                            color = OnDarkMuted,
-                            modifier = Modifier.padding(16.dp),
-                        )
-                    } else {
-                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                            itemsIndexed(state.cues, key = { _, cue -> cue.index to cue.start }) { index, cue ->
-                                val highlighted = index == state.currentCueIndex
-                                Box {
-                                    Text(
-                                        text = formatCueListLine(cue),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = if (highlighted) AccentPurple else Color.Unspecified,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(if (highlighted) AccentPurple.copy(alpha = 0.12f) else Color.Transparent)
-                                            .combinedClickable(
-                                                onClick = { viewModel.seekToCue(index) },
-                                                onLongClick = { menuIndex = index },
-                                            )
-                                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    )
-                                    DropdownMenu(
-                                        expanded = menuIndex == index,
-                                        onDismissRequest = { menuIndex = null },
-                                    ) {
-                                        DropdownMenuItem(
-                                            text = { Text("重复播放") },
-                                            onClick = {
-                                                viewModel.startRepeat(index)
-                                                menuIndex = null
-                                            },
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("复制") },
-                                            onClick = {
-                                                clipboard.setText(AnnotatedString(cue.text))
-                                                menuIndex = null
-                                            },
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("编辑") },
-                                            onClick = {
-                                                menuIndex = null
-                                                onEdit(index)
-                                            },
-                                        )
-                                    }
-                                }
-                            }
+        Box(Modifier.padding(innerPadding).fillMaxSize()) {
+            if (immersiveActive) {
+                ImmersivePlayerLayout(
+                    devicePortrait = devicePortrait,
+                    sizePercent = display.immersiveListSizePercent,
+                    sideLandscape = display.immersiveListSideLandscape,
+                    sidePortrait = display.immersiveListSidePortrait,
+                    listOpacity = display.immersiveListOpacity,
+                    onSizePercentChange = { percent ->
+                        viewModel.updateDisplaySettings {
+                            it.copy(immersiveListSizePercent = percent)
                         }
-                    }
-                }
-            },
-        )
+                    },
+                    video = {
+                        VideoPane(
+                            player = viewModel.player,
+                            isAudio = state.isAudio,
+                            playing = state.playing,
+                            sideBySide = sideBySide,
+                            onscreenText = onscreenText,
+                            displaySettings = display,
+                            onToggleChrome = { chromeVisible = !chromeVisible },
+                            onTogglePlay = viewModel::togglePlayPause,
+                        )
+                    },
+                    list = { listContent(Color.Transparent, true) },
+                )
+            } else {
+                SplitPaneLayout(
+                    modifier = Modifier.fillMaxSize(),
+                    sideBySide = sideBySide,
+                    fraction = splitFraction,
+                    onFractionChange = { splitFraction = it.coerceIn(0.28f, 0.75f) },
+                    primary = {
+                        VideoPane(
+                            player = viewModel.player,
+                            isAudio = state.isAudio,
+                            playing = state.playing,
+                            sideBySide = sideBySide,
+                            onscreenText = onscreenText,
+                            displaySettings = display,
+                            onToggleChrome = { chromeVisible = !chromeVisible },
+                            onTogglePlay = viewModel::togglePlayPause,
+                        )
+                    },
+                    secondary = {
+                        listContent(SurfacePanel, true)
+                    },
+                )
+            }
+        }
     }
 
     if (showCountdown) {
@@ -314,11 +421,84 @@ fun PlayerScreen(
 }
 
 @Composable
+private fun ImmersivePlayerLayout(
+    devicePortrait: Boolean,
+    sizePercent: Int,
+    sideLandscape: ImmersiveListSideLandscape,
+    sidePortrait: ImmersiveListSidePortrait,
+    listOpacity: Float,
+    onSizePercentChange: (Int) -> Unit,
+    video: @Composable () -> Unit,
+    list: @Composable () -> Unit,
+) {
+    val listBg = Color.Black.copy(alpha = listOpacity.coerceIn(0f, 1f))
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        video()
+        val fraction = (sizePercent / 100f).coerceIn(0.18f, 0.70f)
+        if (devicePortrait) {
+            val listH = (maxHeight * fraction)
+            val top = sidePortrait == ImmersiveListSidePortrait.Top
+            val dragState = rememberDraggableState { delta ->
+                val total = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+                val current = total * fraction
+                val next = if (top) current + delta else current - delta
+                onSizePercentChange(((next / total) * 100f).toInt().coerceIn(18, 70))
+            }
+            Box(
+                modifier = Modifier
+                    .align(if (top) Alignment.TopCenter else Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(listH)
+                    .background(listBg),
+            ) {
+                list()
+                SplitHandle(
+                    Orientation.Vertical,
+                    Modifier
+                        .align(if (top) Alignment.BottomCenter else Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(14.dp)
+                        .draggable(dragState, Orientation.Vertical),
+                )
+            }
+        } else {
+            val listW = maxWidth * fraction
+            val left = sideLandscape == ImmersiveListSideLandscape.Left
+            val dragState = rememberDraggableState { delta ->
+                val total = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                val current = total * fraction
+                val next = if (left) current + delta else current - delta
+                onSizePercentChange(((next / total) * 100f).toInt().coerceIn(18, 70))
+            }
+            Box(
+                modifier = Modifier
+                    .align(if (left) Alignment.CenterStart else Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(listW)
+                    .background(listBg),
+            ) {
+                list()
+                SplitHandle(
+                    Orientation.Horizontal,
+                    Modifier
+                        .align(if (left) Alignment.CenterEnd else Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .width(14.dp)
+                        .draggable(dragState, Orientation.Horizontal),
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun VideoPane(
     player: androidx.media3.exoplayer.ExoPlayer,
     isAudio: Boolean,
     playing: Boolean,
     sideBySide: Boolean,
+    onscreenText: String?,
+    displaySettings: com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings,
     onToggleChrome: () -> Unit,
     onTogglePlay: () -> Unit,
 ) {
@@ -392,6 +572,11 @@ private fun VideoPane(
                     },
             )
         }
+        OnScreenSubtitleOverlay(
+            text = onscreenText,
+            settings = displaySettings,
+            modifier = Modifier.fillMaxSize(),
+        )
         if (!playing) {
             IconButton(onClick = onTogglePlay) {
                 Icon(
@@ -558,12 +743,39 @@ fun SplitPaneLayout(
 
 @Composable
 private fun SplitHandle(orientation: Orientation, modifier: Modifier) {
-    Box(modifier = modifier.background(WindowBackground), contentAlignment = Alignment.Center) {
+    Box(modifier = modifier.background(WindowBackground.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
         val thumb = if (orientation == Orientation.Horizontal) {
             Modifier.width(3.dp).height(36.dp)
         } else {
             Modifier.fillMaxWidth(0.18f).height(3.dp)
         }
         Box(modifier = thumb.clip(RoundedCornerShape(2.dp)).background(AccentPurple.copy(alpha = 0.7f)))
+    }
+}
+
+internal fun subtitleCenterScrollDelta(
+    itemOffset: Int,
+    itemSize: Int,
+    viewportStart: Int,
+    viewportEnd: Int,
+): Int {
+    val viewportCenter = (viewportStart + viewportEnd) / 2
+    val itemCenter = itemOffset + itemSize / 2
+    return itemCenter - viewportCenter
+}
+
+private suspend fun LazyListState.centerItem(index: Int) {
+    if (index < 0) return
+    scrollToItem(index)
+    val layout = layoutInfo
+    val item = layout.visibleItemsInfo.firstOrNull { it.index == index } ?: return
+    val delta = subtitleCenterScrollDelta(
+        item.offset,
+        item.size,
+        layout.viewportStartOffset,
+        layout.viewportEndOffset,
+    )
+    if (delta != 0) {
+        scrollBy(delta.toFloat())
     }
 }
