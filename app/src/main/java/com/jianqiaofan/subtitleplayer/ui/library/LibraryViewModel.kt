@@ -8,15 +8,21 @@ import com.jianqiaofan.subtitleplayer.data.AppPreferences
 import com.jianqiaofan.subtitleplayer.data.MediaLibrary
 import com.jianqiaofan.subtitleplayer.domain.model.MediaEntry
 import com.jianqiaofan.subtitleplayer.domain.model.RecentFolder
+import com.jianqiaofan.subtitleplayer.domain.model.RecentMedia
+import com.jianqiaofan.subtitleplayer.domain.playback.PlaybackRecord
+import com.jianqiaofan.subtitleplayer.domain.playback.resolvePlayedPercent
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class LibraryUiState(
     val recents: List<RecentFolder> = emptyList(),
+    val recentMedia: List<RecentMedia> = emptyList(),
     val currentTreeUri: String? = null,
     val currentFolderName: String? = null,
     val media: List<MediaEntry> = emptyList(),
@@ -27,6 +33,8 @@ data class LibraryUiState(
 class LibraryViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = AppPreferences(application)
     private val library = MediaLibrary(application)
+    private var folderMedia: List<MediaEntry> = emptyList()
+    private var playback: Map<String, PlaybackRecord> = emptyMap()
 
     private val _state = MutableStateFlow(LibraryUiState())
     val state: StateFlow<LibraryUiState> = _state.asStateFlow()
@@ -35,6 +43,20 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             prefs.recentFolders.collectLatest { recents ->
                 _state.update { it.copy(recents = recents) }
+            }
+        }
+        viewModelScope.launch {
+            prefs.recentMedia.collectLatest { stored ->
+                val visible = withContext(Dispatchers.IO) {
+                    stored.filter { library.documentExists(Uri.parse(it.uri)) }
+                }
+                _state.update { it.copy(recentMedia = visible) }
+            }
+        }
+        viewModelScope.launch {
+            prefs.playbackRecords.collectLatest { records ->
+                playback = records
+                publishFolderMedia()
             }
         }
         viewModelScope.launch {
@@ -63,6 +85,34 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun rememberAndOpen(media: MediaEntry, onOpen: (String, String) -> Unit) {
+        viewModelScope.launch {
+            prefs.rememberMedia(
+                media.documentUri,
+                media.displayName,
+                _state.value.currentFolderName.orEmpty(),
+            )
+            onOpen(media.documentUri, media.displayName)
+        }
+    }
+
+    fun onMediaFilePicked(uri: Uri, onOpen: (String, String) -> Unit) {
+        viewModelScope.launch {
+            library.persistReadPermission(uri)
+            val name = withContext(Dispatchers.IO) { library.displayNameOf(uri) } ?: "媒体"
+            prefs.rememberMedia(uri.toString(), name, _state.value.currentFolderName.orEmpty())
+            onOpen(uri.toString(), name)
+        }
+    }
+
+    fun removeRecentFolder(treeUri: String) {
+        viewModelScope.launch { prefs.removeRecentFolder(treeUri) }
+    }
+
+    fun setFolderRemark(treeUri: String, remark: String) {
+        viewModelScope.launch { prefs.setFolderRemark(treeUri, remark) }
+    }
+
     fun consumeMessage() {
         _state.update { it.copy(message = null) }
     }
@@ -79,6 +129,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                     loading = false,
                 )
             }
+            folderMedia = emptyList()
             return
         }
         _state.update { it.copy(loading = true, message = null) }
@@ -96,15 +147,31 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                     message = "无法读取文件夹：${e.message ?: e.javaClass.simpleName}",
                 )
             }
+            folderMedia = emptyList()
             return
         }
+        folderMedia = media
         _state.update {
             it.copy(
                 loading = false,
                 currentTreeUri = uri.toString(),
                 currentFolderName = name,
-                media = media,
+                media = media.withPlayback(playback),
             )
         }
     }
+
+    private fun publishFolderMedia() {
+        if (folderMedia.isEmpty() && _state.value.media.isEmpty()) return
+        _state.update { it.copy(media = folderMedia.withPlayback(playback)) }
+    }
 }
+
+private fun List<MediaEntry>.withPlayback(records: Map<String, PlaybackRecord>): List<MediaEntry> =
+    map { entry ->
+        val record = records[entry.documentUri]
+        entry.copy(
+            lastLeftAt = record?.leftAt?.takeIf { it > 0L },
+            playedPercent = record?.let { resolvePlayedPercent(it, entry.durationMs) },
+        )
+    }

@@ -14,6 +14,10 @@ import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.domain.display.PreferredOrientation
 import com.jianqiaofan.subtitleplayer.domain.display.SubtitleListDensity
 import com.jianqiaofan.subtitleplayer.domain.model.RecentFolder
+import com.jianqiaofan.subtitleplayer.domain.model.RecentMedia
+import com.jianqiaofan.subtitleplayer.domain.playback.PlaybackRecord
+import com.jianqiaofan.subtitleplayer.domain.playback.decodePlayback
+import com.jianqiaofan.subtitleplayer.domain.playback.encodePlayback
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -26,6 +30,18 @@ class AppPreferences(private val context: Context) {
 
     val playbackSpeed: Flow<Float> =
         context.dataStore.data.map { prefs -> prefs[KEY_SPEED] ?: 1.0f }
+
+    val recentMedia: Flow<List<RecentMedia>> =
+        context.dataStore.data.map { prefs -> decodeMedia(prefs[KEY_RECENT_MEDIA].orEmpty()) }
+
+    val batchTagSyncFiles: Flow<List<RecentMedia>> =
+        context.dataStore.data.map { prefs -> decodeMedia(prefs[KEY_BATCH_TAG_FILES].orEmpty()) }
+
+    val batchTagSyncVideoDir: Flow<String?> =
+        context.dataStore.data.map { prefs -> prefs[KEY_BATCH_TAG_DIR]?.ifBlank { null } }
+
+    val playbackRecords: Flow<Map<String, PlaybackRecord>> =
+        context.dataStore.data.map { prefs -> decodePlayback(prefs[KEY_POSITIONS].orEmpty()) }
 
     val currentTreeUri: Flow<String?> =
         context.dataStore.data.map { prefs -> prefs[KEY_CURRENT_TREE]?.ifBlank { null } }
@@ -60,11 +76,30 @@ class AppPreferences(private val context: Context) {
     suspend fun rememberFolder(treeUri: String, displayName: String) {
         val now = System.currentTimeMillis()
         context.dataStore.edit { prefs ->
-            val existing = decodeFolders(prefs[KEY_RECENTS].orEmpty())
-                .filterNot { it.treeUri == treeUri }
-            val next = listOf(RecentFolder(treeUri, displayName, now)) + existing
+            val stored = decodeFolders(prefs[KEY_RECENTS].orEmpty())
+            val remark = stored.firstOrNull { it.treeUri == treeUri }?.remark.orEmpty()
+            val existing = stored.filterNot { it.treeUri == treeUri }
+            val next = listOf(RecentFolder(treeUri, displayName, now, remark)) + existing
             prefs[KEY_RECENTS] = encodeFolders(next.take(MAX_RECENTS))
             prefs[KEY_CURRENT_TREE] = treeUri
+        }
+    }
+
+    suspend fun setFolderRemark(treeUri: String, remark: String) {
+        val cleaned = remark.trim().replace('\t', ' ').replace('\n', ' ')
+        context.dataStore.edit { prefs ->
+            val existing = decodeFolders(prefs[KEY_RECENTS].orEmpty()).map { folder ->
+                if (folder.treeUri == treeUri) folder.copy(remark = cleaned) else folder
+            }
+            prefs[KEY_RECENTS] = encodeFolders(existing)
+        }
+    }
+
+    suspend fun removeRecentFolder(treeUri: String) {
+        context.dataStore.edit { prefs ->
+            val existing = decodeFolders(prefs[KEY_RECENTS].orEmpty())
+                .filterNot { it.treeUri == treeUri }
+            prefs[KEY_RECENTS] = encodeFolders(existing)
         }
     }
 
@@ -105,20 +140,60 @@ class AppPreferences(private val context: Context) {
         saveDisplaySettings(transform(displaySettingsOnce()))
     }
 
-    suspend fun savePosition(mediaUri: String, positionMs: Long) {
+    suspend fun rememberMedia(uri: String, displayName: String, folderLabel: String) {
+        if (uri.isBlank() || displayName.isBlank()) return
         context.dataStore.edit { prefs ->
-            val map = decodePositions(prefs[KEY_POSITIONS].orEmpty()).toMutableMap()
-            map[mediaUri] = positionMs
-            prefs[KEY_POSITIONS] = encodePositions(map)
+            val existing = decodeMedia(prefs[KEY_RECENT_MEDIA].orEmpty())
+                .filterNot { it.uri == uri }
+            val next = listOf(
+                RecentMedia(
+                    uri = uri,
+                    displayName = displayName.replace('\t', ' '),
+                    folderLabel = folderLabel.replace('\t', ' '),
+                ),
+            ) + existing
+            prefs[KEY_RECENT_MEDIA] = encodeMedia(next.take(MAX_RECENT_MEDIA))
+        }
+    }
+
+    suspend fun batchTagSyncFilesOnce(): List<RecentMedia> = batchTagSyncFiles.first()
+
+    suspend fun batchTagSyncVideoDirOnce(): String? = batchTagSyncVideoDir.first()
+
+    suspend fun rememberBatchTagSync(files: List<RecentMedia>, videoTreeUri: String?) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_BATCH_TAG_FILES] = encodeMedia(files)
+            if (videoTreeUri.isNullOrBlank()) {
+                prefs.remove(KEY_BATCH_TAG_DIR)
+            } else {
+                prefs[KEY_BATCH_TAG_DIR] = videoTreeUri
+            }
+        }
+    }
+
+    suspend fun savePlayback(mediaUri: String, positionMs: Long, durationMs: Long, leftAt: Long) {
+        if (mediaUri.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val map = decodePlayback(prefs[KEY_POSITIONS].orEmpty()).toMutableMap()
+            map[mediaUri] = PlaybackRecord(
+                positionMs = positionMs.coerceAtLeast(0L),
+                durationMs = durationMs.coerceAtLeast(0L),
+                leftAt = leftAt,
+            )
+            prefs[KEY_POSITIONS] = encodePlayback(map)
         }
     }
 
     suspend fun loadPosition(mediaUri: String): Long? =
-        decodePositions(context.dataStore.data.first()[KEY_POSITIONS].orEmpty())[mediaUri]
+        decodePlayback(context.dataStore.data.first()[KEY_POSITIONS].orEmpty())[mediaUri]?.positionMs
 
     companion object {
         const val MAX_RECENTS = 8
+        const val MAX_RECENT_MEDIA = 15
         private val KEY_RECENTS = stringPreferencesKey("recent_folders")
+        private val KEY_RECENT_MEDIA = stringPreferencesKey("recent_media")
+        private val KEY_BATCH_TAG_FILES = stringPreferencesKey("batch_tag_sync_files")
+        private val KEY_BATCH_TAG_DIR = stringPreferencesKey("batch_tag_sync_video_dir")
         private val KEY_CURRENT_TREE = stringPreferencesKey("current_tree")
         private val KEY_SPEED = floatPreferencesKey("playback_speed")
         private val KEY_POSITIONS = stringPreferencesKey("positions")
@@ -140,7 +215,9 @@ class AppPreferences(private val context: Context) {
         private val KEY_ORIENTATION = stringPreferencesKey("preferred_orientation")
 
         private fun encodeFolders(folders: List<RecentFolder>): String =
-            folders.joinToString("\n") { "${it.treeUri}\t${it.displayName}\t${it.lastOpenedAt}" }
+            folders.joinToString("\n") {
+                "${it.treeUri}\t${it.displayName}\t${it.lastOpenedAt}\t${it.remark}"
+            }
 
         private fun decodeFolders(raw: String): List<RecentFolder> =
             raw.lineSequence()
@@ -148,22 +225,22 @@ class AppPreferences(private val context: Context) {
                 .mapNotNull { line ->
                     val parts = line.split('\t')
                     if (parts.size < 3) return@mapNotNull null
-                    RecentFolder(parts[0], parts[1], parts[2].toLongOrNull() ?: 0L)
+                    val remark = if (parts.size >= 4) parts.subList(3, parts.size).joinToString("\t") else ""
+                    RecentFolder(parts[0], parts[1], parts[2].toLongOrNull() ?: 0L, remark)
                 }
                 .toList()
 
-        private fun encodePositions(map: Map<String, Long>): String =
-            map.entries.joinToString("\n") { "${it.key}\t${it.value}" }
+        private fun encodeMedia(items: List<RecentMedia>): String =
+            items.joinToString("\n") { "${it.uri}\t${it.displayName}\t${it.folderLabel}" }
 
-        private fun decodePositions(raw: String): Map<String, Long> =
+        private fun decodeMedia(raw: String): List<RecentMedia> =
             raw.lineSequence()
                 .filter { it.isNotBlank() }
                 .mapNotNull { line ->
                     val parts = line.split('\t')
                     if (parts.size < 2) return@mapNotNull null
-                    val value = parts[1].toLongOrNull() ?: return@mapNotNull null
-                    parts[0] to value
+                    RecentMedia(parts[0], parts[1], parts.getOrElse(2) { "" })
                 }
-                .toMap()
+                .toList()
     }
 }

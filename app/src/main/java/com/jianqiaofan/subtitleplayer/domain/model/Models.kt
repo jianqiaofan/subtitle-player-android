@@ -24,13 +24,33 @@ data class MediaEntry(
     val isAudio: Boolean,
     val durationMs: Long? = null,
     val subtitleCount: Int = 0,
+    val lastLeftAt: Long? = null,
+    val playedPercent: Int? = null,
 )
 
 data class RecentFolder(
     val treeUri: String,
     val displayName: String,
     val lastOpenedAt: Long,
+    val remark: String = "",
 )
+
+fun RecentFolder.visibleLabel(): String = remark.trim().ifEmpty { displayName }
+
+data class RecentMedia(
+    val uri: String,
+    val displayName: String,
+    val folderLabel: String,
+)
+
+fun recentMediaMenuLabel(item: RecentMedia, visible: List<RecentMedia>): String {
+    val duplicated = visible.count { it.displayName == item.displayName } > 1
+    return if (duplicated && item.folderLabel.isNotBlank()) {
+        "${item.displayName} — ${item.folderLabel}"
+    } else {
+        item.displayName
+    }
+}
 
 val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v")
 val AUDIO_EXTENSIONS = setOf("mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus")

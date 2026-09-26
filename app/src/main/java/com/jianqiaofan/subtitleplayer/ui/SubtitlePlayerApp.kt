@@ -1,5 +1,7 @@
 package com.jianqiaofan.subtitleplayer.ui
 
+import androidx.activity.ComponentActivity
+import android.app.Activity
 import android.app.Application
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
@@ -19,13 +21,19 @@ import androidx.navigation.navArgument
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.ui.edit.EditSubtitleScreen
+import com.jianqiaofan.subtitleplayer.ui.library.FolderPickerScreen
 import com.jianqiaofan.subtitleplayer.ui.library.LibraryScreen
+import com.jianqiaofan.subtitleplayer.ui.library.MediaBrowserScreen
 import com.jianqiaofan.subtitleplayer.ui.player.PlayerScreen
 import com.jianqiaofan.subtitleplayer.ui.player.PlayerViewModel
+import com.jianqiaofan.subtitleplayer.ui.player.SleepShutdownViewModel
+import com.jianqiaofan.subtitleplayer.ui.player.SleepWarningDialog
 import com.jianqiaofan.subtitleplayer.ui.theme.WindowBackground
 
 object Routes {
     const val Library = "library"
+    const val MediaBrowser = "mediaBrowser"
+    const val FolderPicker = "folderPicker"
     const val Player = "player/{mediaUri}/{mediaName}"
     const val Edit = "player/{mediaUri}/{mediaName}/edit/{index}"
 
@@ -46,12 +54,43 @@ fun SubtitlePlayerApp() {
     )
     ApplyPreferredOrientation(displaySettings.preferredOrientation)
 
+    val activity = LocalContext.current as ComponentActivity
+    val sleepShutdown: SleepShutdownViewModel = viewModel(viewModelStoreOwner = activity)
+    val sleepState by sleepShutdown.state.collectAsStateWithLifecycle()
+    LaunchedEffect(sleepState.exitNow) {
+        if (sleepState.exitNow) activity.finish()
+    }
+
     Surface(modifier = Modifier.fillMaxSize(), color = WindowBackground) {
         NavHost(navController = navController, startDestination = Routes.Library) {
             composable(Routes.Library) {
+                val fromPlayer = navController.previousBackStackEntry?.destination?.route == Routes.Player
+                val activity = LocalContext.current as? Activity
                 LibraryScreen(
-                    onOpenMedia = { uri, name -> navController.navigate(Routes.player(uri, name)) },
+                    onOpenMedia = { uri, name ->
+                        navController.navigate(Routes.player(uri, name)) {
+                            popUpTo(Routes.Library) { inclusive = false }
+                        }
+                    },
+                    onBrowseMedia = { navController.navigate(Routes.MediaBrowser) },
+                    onChooseFolder = { navController.navigate(Routes.FolderPicker) },
+                    showBack = fromPlayer,
+                    onBack = { navController.popBackStack() },
+                    onExit = { activity?.finish() },
                 )
+            }
+            composable(Routes.MediaBrowser) {
+                MediaBrowserScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpen = { uri, name ->
+                        navController.navigate(Routes.player(uri, name)) {
+                            popUpTo(Routes.Library) { inclusive = false }
+                        }
+                    },
+                )
+            }
+            composable(Routes.FolderPicker) {
+                FolderPickerScreen(onBack = { navController.popBackStack() })
             }
             composable(
                 route = Routes.Player,
@@ -65,8 +104,18 @@ fun SubtitlePlayerApp() {
                 PlayerScreen(
                     mediaUri = uri,
                     mediaName = name,
-                    onBack = { navController.popBackStack() },
+                    onBack = {
+                        navController.navigate(Routes.Library) {
+                            launchSingleTop = true
+                        }
+                    },
                     onEdit = { index -> navController.navigate(Routes.edit(uri, name, index)) },
+                    onOpenMedia = { nextUri, nextName ->
+                        navController.navigate(Routes.player(nextUri, nextName)) {
+                            popUpTo(Routes.Player) { inclusive = true }
+                        }
+                    },
+                    onBrowseMedia = { navController.navigate(Routes.MediaBrowser) },
                 )
             }
             composable(
@@ -109,5 +158,12 @@ fun SubtitlePlayerApp() {
                 }
             }
         }
+    }
+    if (sleepState.warning && !sleepState.exitNow) {
+        SleepWarningDialog(
+            remainSec = sleepState.warningRemainSec,
+            onSnooze = sleepShutdown::snoozeMinutes,
+            onCancelTimer = sleepShutdown::cancel,
+        )
     }
 }

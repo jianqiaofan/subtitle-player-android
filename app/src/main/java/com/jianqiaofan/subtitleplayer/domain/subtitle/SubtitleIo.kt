@@ -40,9 +40,12 @@ fun formatClock(seconds: Double): String {
     }
 }
 
+fun formatCueListHeader(cue: SubtitleCue): String =
+    "${cue.index}. [${formatClock(cue.start)} → ${formatClock(cue.end)}]"
+
 fun formatCueListLine(cue: SubtitleCue): String {
     val text = cue.text.replace("\n", " / ")
-    return "${cue.index}. [${formatClock(cue.start)} → ${formatClock(cue.end)}] $text"
+    return "${formatCueListHeader(cue)} $text"
 }
 
 fun findCueIndexAtTime(cues: List<SubtitleCue>, seconds: Double): Int {

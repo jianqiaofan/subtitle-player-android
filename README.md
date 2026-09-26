@@ -27,6 +27,8 @@
 
 支持的媒体扩展名见 `AGENTS.md` 第 6.1 节。字幕只认外部 `.srt` / `.vtt`。
 
+标签和备注写在同目录的 `字幕文件名.tags.json`（例如 `课程名_中文.srt.tags.json`），不改字幕正文。从电脑拷贝时，把字幕文件和对应的标签文件放在同一文件夹即可互相打开。播放页可以打标签、筛选、同步标签文件；「批量同步标签」一次处理一个视频文件夹（含子文件夹）里的多部视频。
+
 ## 在 Android Studio 里运行
 
 1. 安装 [Android Studio](https://developer.android.com/studio)（需 Android SDK，compileSdk 37）。

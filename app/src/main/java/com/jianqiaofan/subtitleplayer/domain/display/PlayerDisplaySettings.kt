@@ -207,6 +207,36 @@ fun parseColorArgb(hex: String, fallback: Long = 0xFFFFFFFF): Long {
 /** Compact list line: body only; keep original newlines for multi-line display. */
 fun formatCueListBody(cue: SubtitleCue): String = cue.text
 
+data class OnScreenHorizontalSpan(
+    val startFraction: Float,
+    val endFraction: Float,
+) {
+    val widthFraction: Float get() = (endFraction - startFraction).coerceAtLeast(0f)
+
+    companion object {
+        val Full = OnScreenHorizontalSpan(0f, 1f)
+    }
+}
+
+/**
+ * When the immersive list covers the left or right of the picture, on-screen
+ * captions center in the remaining width. Top/bottom lists do not change horizontal placement.
+ */
+fun onScreenHorizontalSpan(
+    immersiveListVisible: Boolean,
+    coversHorizontal: Boolean,
+    listOnLeft: Boolean,
+    listFraction: Float,
+): OnScreenHorizontalSpan {
+    if (!immersiveListVisible || !coversHorizontal) return OnScreenHorizontalSpan.Full
+    val fraction = listFraction.coerceIn(0.18f, 0.70f)
+    return if (listOnLeft) {
+        OnScreenHorizontalSpan(fraction, 1f)
+    } else {
+        OnScreenHorizontalSpan(0f, 1f - fraction)
+    }
+}
+
 fun joinSelectedCueTexts(cues: List<SubtitleCue>, indices: Collection<Int>): String =
     indices.sorted()
         .mapNotNull { cues.getOrNull(it)?.text }
