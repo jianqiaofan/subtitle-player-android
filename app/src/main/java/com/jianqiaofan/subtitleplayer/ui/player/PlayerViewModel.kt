@@ -41,6 +41,7 @@ import com.jianqiaofan.subtitleplayer.domain.tags.applyTagEdit
 import com.jianqiaofan.subtitleplayer.domain.tags.attachUnmatchedToCue
 import com.jianqiaofan.subtitleplayer.domain.tags.clearTags
 import com.jianqiaofan.subtitleplayer.domain.tags.collectCustomTagNames
+import com.jianqiaofan.subtitleplayer.domain.tags.companionSubtitleNames
 import com.jianqiaofan.subtitleplayer.domain.tags.deleteUnmatched
 import com.jianqiaofan.subtitleplayer.domain.tags.describeSyncResults
 import com.jianqiaofan.subtitleplayer.domain.tags.releaseFilterIfNoTags
@@ -375,7 +376,12 @@ class PlayerViewModel(
     }
 
     fun toggleMute() {
-        val muted = !_state.value.muted
+        setPlaybackAudible(_state.value.muted)
+    }
+
+    fun setPlaybackAudible(audible: Boolean) {
+        val muted = !audible
+        if (_state.value.muted == muted && player.volume == (if (muted) 0f else 1f)) return
         player.volume = if (muted) 0f else 1f
         _state.update { it.copy(muted = muted) }
     }
@@ -609,9 +615,21 @@ class PlayerViewModel(
     private suspend fun refreshCustomTags() {
         val tree = contentTreeUri ?: return
         val directory = contentDirectoryUri ?: return
-        val documents = _state.value.tracks.mapNotNull { track ->
-            tagDocuments.readInFolder(tree, directory, track.fileName)
+        val currentName = _state.value.selectedTrack?.fileName
+        val ordered = withContext(Dispatchers.IO) {
+            val directoryId = try {
+                android.provider.DocumentsContract.getDocumentId(directory)
+            } catch (_: Exception) {
+                return@withContext emptyList()
+            }
+            val names = library.listFolder(tree, directoryId).map { it.displayName }
+            val companions = companionSubtitleNames(mediaName, names)
+            buildList {
+                if (!currentName.isNullOrBlank()) add(currentName)
+                companions.filter { it != currentName }.forEach { add(it) }
+            }
         }
+        val documents = ordered.mapNotNull { name -> tagDocuments.readInFolder(tree, directory, name) }
         _state.update { it.copy(customTagNames = collectCustomTagNames(documents)) }
     }
 

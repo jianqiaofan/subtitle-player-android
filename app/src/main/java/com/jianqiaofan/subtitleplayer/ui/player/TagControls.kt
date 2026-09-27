@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.jianqiaofan.subtitleplayer.domain.tags.PRESET_TAGS
+import com.jianqiaofan.subtitleplayer.domain.tags.TAG_CATEGORIES
 import com.jianqiaofan.subtitleplayer.domain.tags.TagListFilter
 import com.jianqiaofan.subtitleplayer.domain.tags.normalizeCustomTagName
 import com.jianqiaofan.subtitleplayer.ui.theme.AccentPurple
@@ -45,7 +46,7 @@ fun TagFilterBar(
     FlowRow(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(1.5.dp),
     ) {
         buttons.forEach { (name, count) ->
             val wide = name.length > 16
@@ -102,20 +103,22 @@ fun TagEditDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("预设标签")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    PRESET_TAGS.forEach { name ->
-                        FilterChip(
-                            selected = name in selected,
-                            onClick = {
-                                selected = if (name in selected) selected - name else selected + name
-                            },
-                            label = { Text(name) },
-                        )
+                TAG_CATEGORIES.forEach { (title, names) ->
+                    Text(title)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        names.forEach { name ->
+                            FilterChip(
+                                selected = name in selected,
+                                onClick = {
+                                    selected = if (name in selected) selected - name else selected + name
+                                },
+                                label = { Text(name) },
+                            )
+                        }
                     }
                 }
+                Text("自定义")
                 if (customs.isNotEmpty()) {
-                    Text("这部视频用过的自定义标签")
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         customs.forEach { name ->
                             FilterChip(
@@ -130,19 +133,26 @@ fun TagEditDialog(
                 }
                 OutlinedTextField(
                     value = customDraft,
-                    onValueChange = { customDraft = it.take(48) },
+                    onValueChange = { customDraft = it.replace("\n", "").replace("\r", "").replace("\t", "").take(48) },
                     label = { Text("新增自定义标签") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 TextButton(onClick = {
-                    val name = normalizeCustomTagName(customDraft)
-                    if (name == null) {
-                        hint = "自定义标签需为 1～48 个字，且不能与预设标签重名"
-                    } else {
-                        selected = selected + name
+                    val trimmed = customDraft.trim()
+                    if (trimmed in PRESET_TAGS) {
+                        selected = selected + trimmed
                         customDraft = ""
                         hint = null
+                    } else {
+                        val name = normalizeCustomTagName(customDraft)
+                        if (name == null) {
+                            hint = "自定义标签需为 1～48 个字，不能包含换行或制表符"
+                        } else {
+                            selected = selected + name
+                            customDraft = ""
+                            hint = null
+                        }
                     }
                 }) { Text("加入", color = AccentPurple) }
                 if (hint != null) Text(hint.orEmpty())

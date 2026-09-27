@@ -6,10 +6,9 @@ import android.content.res.Configuration
 import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -204,6 +203,7 @@ fun PlayerScreen(
     var showSleep by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showBatch by remember { mutableStateOf(false) }
+    var showExtract by remember { mutableStateOf(false) }
     var explainSync by remember { mutableStateOf(false) }
     var toolsMenu by remember { mutableStateOf(false) }
     var tagEditIndices by remember { mutableStateOf<List<Int>?>(null) }
@@ -274,8 +274,13 @@ fun PlayerScreen(
     val followRow = listRows.indexOfFirst { row ->
         row is com.jianqiaofan.subtitleplayer.domain.tags.SubtitleListRow.Cue && row.cueIndex == state.currentCueIndex
     }
-    LaunchedEffect(followRow, followPaused) {
-        if (!followPaused && followRow >= 0) {
+    val followSuspended = subtitleFollowSuspended(
+        playing = state.playing,
+        menuOpen = menuIndex != null,
+        selecting = selectionMode,
+    )
+    LaunchedEffect(followRow, followPaused, followSuspended) {
+        if (!followPaused && !followSuspended && followRow >= 0) {
             listState.centerItem(followRow)
         }
     }
@@ -355,6 +360,13 @@ fun PlayerScreen(
         )
         return
     }
+    if (showExtract) {
+        ExtractTagsScreen(
+            onBack = { showExtract = false },
+            onApplied = { viewModel.reloadTagsFromDisk() },
+        )
+        return
+    }
 
     val playerTopBar: @Composable (Color, Boolean) -> Unit = { barColor, overlay ->
         TopAppBar(
@@ -392,6 +404,10 @@ fun PlayerScreen(
                         DropdownMenuItem(
                             text = { Text("批量同步标签") },
                             onClick = { toolsMenu = false; showBatch = true },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("提取全部标签") },
+                            onClick = { toolsMenu = false; showExtract = true },
                         )
                     }
                 }
@@ -482,6 +498,7 @@ fun PlayerScreen(
                     displaySettings = effectiveDisplay,
                     horizontalSpan = com.jianqiaofan.subtitleplayer.domain.display.OnScreenHorizontalSpan.Full,
                     onTogglePlay = viewModel::togglePlayPause,
+                    onPlaybackAudible = viewModel::setPlaybackAudible,
                     onRotate = {
                         val next = display.preferredOrientation.toggledFrom(devicePortrait)
                         viewModel.updateDisplaySettings { it.copy(preferredOrientation = next) }
@@ -515,6 +532,7 @@ fun PlayerScreen(
                             displaySettings = effectiveDisplay,
                             horizontalSpan = captionSpan,
                             onTogglePlay = viewModel::togglePlayPause,
+                            onPlaybackAudible = viewModel::setPlaybackAudible,
                             showPauseOverlays = false,
                             onRotate = {
                                 val next = display.preferredOrientation.toggledFrom(devicePortrait)
@@ -541,6 +559,7 @@ fun PlayerScreen(
                             displaySettings = effectiveDisplay,
                             horizontalSpan = com.jianqiaofan.subtitleplayer.domain.display.OnScreenHorizontalSpan.Full,
                             onTogglePlay = viewModel::togglePlayPause,
+                            onPlaybackAudible = viewModel::setPlaybackAudible,
                             onRotate = {
                                 val next = display.preferredOrientation.toggledFrom(devicePortrait)
                                 viewModel.updateDisplaySettings { it.copy(preferredOrientation = next) }
@@ -770,6 +789,7 @@ private fun VideoPane(
     displaySettings: com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings,
     horizontalSpan: com.jianqiaofan.subtitleplayer.domain.display.OnScreenHorizontalSpan,
     onTogglePlay: () -> Unit,
+    onPlaybackAudible: (Boolean) -> Unit,
     showPauseOverlays: Boolean = true,
     onRotate: () -> Unit,
     onSubtitleSettings: () -> Unit,
@@ -778,6 +798,64 @@ private fun VideoPane(
     var viewportWidth by remember { mutableFloatStateOf(0f) }
     var viewportHeight by remember { mutableFloatStateOf(0f) }
     val onTapAction by rememberUpdatedState(newValue = onTogglePlay)
+    val onAudible by rememberUpdatedState(newValue = onPlaybackAudible)
+    val context = LocalContext.current
+    val audioManager = remember(context) {
+        context.getSystemService(android.media.AudioManager::class.java)
+    }
+    var levelHud by remember { mutableStateOf<String?>(null) }
+    var levelHudHolding by remember { mutableStateOf(false) }
+    LaunchedEffect(levelHudHolding, levelHud) {
+        if (levelHudHolding || levelHud == null) return@LaunchedEffect
+        delay(700)
+        levelHud = null
+    }
+
+    fun readBrightness(): Float {
+        val activity = context.findHostActivity() ?: return 0.5f
+        val current = activity.window.attributes.screenBrightness
+        if (current in 0f..1f) return current
+        val system = try {
+            android.provider.Settings.System.getInt(
+                activity.contentResolver,
+                android.provider.Settings.System.SCREEN_BRIGHTNESS,
+            )
+        } catch (_: Exception) {
+            128
+        }
+        return (system / 255f).coerceIn(0f, 1f)
+    }
+
+    fun applyBrightness(level: Float) {
+        val activity = context.findHostActivity() ?: return
+        val applied = playbackBrightness(level)
+        val attrs = activity.window.attributes
+        attrs.screenBrightness = applied
+        activity.window.attributes = attrs
+        levelHud = "亮度 ${levelPercent(applied)}%"
+    }
+
+    fun readVolume(): Float {
+        val manager = audioManager ?: return 0f
+        val max = manager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        if (max <= 0) return 0f
+        return manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() / max
+    }
+
+    fun applyVolume(level: Float) {
+        val manager = audioManager ?: return
+        val stream = android.media.AudioManager.STREAM_MUSIC
+        val max = manager.getStreamMaxVolume(stream)
+        val index = volumeIndexForLevel(level, max)
+        try {
+            manager.setStreamVolume(stream, index, 0)
+        } catch (_: SecurityException) {
+            return
+        }
+        onAudible(index > 0)
+        val shown = if (max <= 0) 0 else levelPercent(index.toFloat() / max)
+        levelHud = "音量 $shown%"
+    }
 
     fun applyGesture(centroidX: Float, centroidY: Float, panX: Float, panY: Float, zoom: Float) {
         viewport = applyVideoViewportGesture(
@@ -809,12 +887,11 @@ private fun VideoPane(
                 "音频播放中",
                 color = AccentPurple,
                 style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.clickable { onTogglePlay() },
             )
         } else {
             AndroidView(
-                factory = { context ->
-                    (LayoutInflater.from(context).inflate(R.layout.player_texture_view, null) as PlayerView).apply {
+                factory = { viewContext ->
+                    (LayoutInflater.from(viewContext).inflate(R.layout.player_texture_view, null) as PlayerView).apply {
                         this.player = player
                     }
                 },
@@ -828,26 +905,47 @@ private fun VideoPane(
                         translationY = viewport.offsetY
                     },
             )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectVideoViewportGestures(
-                            canPan = { viewport.scale > VIDEO_MIN_SCALE + 0.01f },
-                            onTap = { onTapAction() },
-                            onGesture = { centroid, pan, zoom ->
-                                applyGesture(centroid.x, centroid.y, pan.x, pan.y, zoom)
-                            },
-                        )
-                    },
-            )
         }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(isAudio) {
+                    detectVideoViewportGestures(
+                        canPan = { !isAudio && viewport.scale > VIDEO_MIN_SCALE + 0.01f },
+                        onTap = { onTapAction() },
+                        onGesture = { centroid, pan, zoom ->
+                            applyGesture(centroid.x, centroid.y, pan.x, pan.y, zoom)
+                        },
+                        onLevelDragStart = { side ->
+                            levelHudHolding = true
+                            if (side == ScreenHalf.Left) readBrightness() else readVolume()
+                        },
+                        onLevelDrag = { side, startLevel, totalY, span ->
+                            val level = levelAfterVerticalDrag(startLevel, totalY, span)
+                            if (side == ScreenHalf.Left) applyBrightness(level) else applyVolume(level)
+                        },
+                        onLevelDragEnd = { levelHudHolding = false },
+                    )
+                },
+        )
         OnScreenSubtitleOverlay(
             text = onscreenText,
             settings = displaySettings,
             horizontalSpan = horizontalSpan,
             modifier = Modifier.fillMaxSize(),
         )
+        levelHud?.let { label ->
+            Text(
+                text = label,
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 24.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
         if (!playing && showPauseOverlays) {
             IconButton(onClick = onTogglePlay) {
                 Icon(
@@ -1056,6 +1154,15 @@ private fun SplitHandle(orientation: Orientation, modifier: Modifier) {
         }
         Box(modifier = thumb.clip(RoundedCornerShape(2.dp)).background(AccentPurple.copy(alpha = 0.7f)))
     }
+}
+
+private fun android.content.Context.findHostActivity(): Activity? {
+    var current: android.content.Context? = this
+    while (current is android.content.ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
 }
 
 internal fun subtitleCenterScrollDelta(

@@ -40,6 +40,12 @@ class AppPreferences(private val context: Context) {
     val batchTagSyncVideoDir: Flow<String?> =
         context.dataStore.data.map { prefs -> prefs[KEY_BATCH_TAG_DIR]?.ifBlank { null } }
 
+    val tagExtractSource: Flow<String?> =
+        context.dataStore.data.map { prefs -> prefs[KEY_TAG_EXTRACT_SOURCE]?.ifBlank { null } }
+
+    val tagExtractDest: Flow<String?> =
+        context.dataStore.data.map { prefs -> prefs[KEY_TAG_EXTRACT_DEST]?.ifBlank { null } }
+
     val playbackRecords: Flow<Map<String, PlaybackRecord>> =
         context.dataStore.data.map { prefs -> decodePlayback(prefs[KEY_POSITIONS].orEmpty()) }
 
@@ -160,6 +166,17 @@ class AppPreferences(private val context: Context) {
 
     suspend fun batchTagSyncVideoDirOnce(): String? = batchTagSyncVideoDir.first()
 
+    suspend fun tagExtractSourceOnce(): String? = tagExtractSource.first()
+
+    suspend fun tagExtractDestOnce(): String? = tagExtractDest.first()
+
+    suspend fun rememberTagExtract(sourceTreeUri: String?, destTreeUri: String?) {
+        context.dataStore.edit { prefs ->
+            if (sourceTreeUri.isNullOrBlank()) prefs.remove(KEY_TAG_EXTRACT_SOURCE) else prefs[KEY_TAG_EXTRACT_SOURCE] = sourceTreeUri
+            if (destTreeUri.isNullOrBlank()) prefs.remove(KEY_TAG_EXTRACT_DEST) else prefs[KEY_TAG_EXTRACT_DEST] = destTreeUri
+        }
+    }
+
     suspend fun rememberBatchTagSync(files: List<RecentMedia>, videoTreeUri: String?) {
         context.dataStore.edit { prefs ->
             prefs[KEY_BATCH_TAG_FILES] = encodeMedia(files)
@@ -194,6 +211,8 @@ class AppPreferences(private val context: Context) {
         private val KEY_RECENT_MEDIA = stringPreferencesKey("recent_media")
         private val KEY_BATCH_TAG_FILES = stringPreferencesKey("batch_tag_sync_files")
         private val KEY_BATCH_TAG_DIR = stringPreferencesKey("batch_tag_sync_video_dir")
+        private val KEY_TAG_EXTRACT_SOURCE = stringPreferencesKey("tag_extract_source")
+        private val KEY_TAG_EXTRACT_DEST = stringPreferencesKey("tag_extract_dest")
         private val KEY_CURRENT_TREE = stringPreferencesKey("current_tree")
         private val KEY_SPEED = floatPreferencesKey("playback_speed")
         private val KEY_POSITIONS = stringPreferencesKey("positions")

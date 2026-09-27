@@ -80,11 +80,17 @@ class SubtitleTagsTest {
     fun primaryColorPriorityAndMasteredDim() {
         assertEquals("难点", primaryTag(listOf("重点", "难点", "已掌握")))
         assertEquals("重点", primaryTag(listOf("跟读", "重点")))
+        assertEquals("存疑", primaryTag(listOf("难点", "存疑", "已掌握")))
+        assertEquals("单词", primaryTag(listOf("已掌握", "单词")))
+        assertEquals("已掌握", primaryTag(listOf("已掌握", "我的")))
         assertEquals("我的", primaryTag(listOf("我的", "另一个")))
+        assertEquals(listOf("重点", "新页面", "跟读", "课堂"), orderedTagNames(listOf("跟读", "课堂", "新页面", "重点", "新页面")))
         assertTrue(subtitleBodyDimmed(listOf("已掌握")))
         assertFalse(subtitleBodyDimmed(listOf("已掌握", "重点")))
-        assertEquals(0xFF6B3030, tagPalette("难点").background)
-        assertEquals(0xFF3A3A3A, tagPalette("自定义").background)
+        assertEquals(0xFF6B3030.toInt(), tagPalette("难点").background.toInt())
+        assertEquals(0xFF5A2048.toInt(), tagPalette("存疑").background.toInt())
+        assertEquals(0xFFFFB0D0.toInt(), tagPalette("存疑").foreground.toInt())
+        assertEquals(0xFF3A3A3A.toInt(), tagPalette("自定义").background.toInt())
     }
 
     @Test
@@ -298,13 +304,17 @@ class SubtitleTagsTest {
         assertEquals("跟读笔记", normalizeCustomTagName("  跟读笔记 "))
         assertNull(normalizeCustomTagName("a".repeat(49)))
         assertNull(normalizeCustomTagName("重点"))
+        assertNull(normalizeCustomTagName("新页面"))
+        assertNull(normalizeCustomTagName("易错"))
+        assertNull(normalizeCustomTagName("课堂\n笔记"))
+        assertNull(normalizeCustomTagName("课堂\t笔记"))
         val names = collectCustomTagNames(
             listOf(
                 TagDocument(1, "a.srt", listOf(entry("aaaaaaaaaaaa", 1, 0.0, "字幕正文在这里呀", listOf("重点", "口语")))),
-                TagDocument(1, "b.srt", listOf(entry("bbbbbbbbbbbb", 1, 0.0, "另一份字幕正文呀", listOf("口语", "语法")))),
+                TagDocument(1, "b.srt", listOf(entry("bbbbbbbbbbbb", 1, 0.0, "另一份字幕正文呀", listOf("口语", "语法", "课堂笔记")))),
             ),
         )
-        assertEquals(listOf("口语", "语法"), names)
+        assertEquals(listOf("口语", "课堂笔记"), names)
     }
 
     @Test
@@ -329,4 +339,98 @@ class SubtitleTagsTest {
         assertEquals("课程.mp4 — 英语", recentMediaMenuLabel(items[0], items))
         assertEquals("别的.mp4", recentMediaMenuLabel(items[2], items))
     }
+
+    @Test
+    fun customNamesStayWithTheLongerMediaStem() {
+        val names = listOf(
+            "lesson.mp4",
+            "lesson_2.mp4",
+            "lesson.srt",
+            "lesson_中文.srt",
+            "lesson_2.srt",
+            "lesson_2_中文.srt",
+            "other.mp4",
+            "other.srt",
+        )
+        assertEquals(listOf("lesson.srt", "lesson_中文.srt"), companionSubtitleNames("lesson.mp4", names))
+        assertEquals(listOf("lesson_2.srt", "lesson_2_中文.srt"), companionSubtitleNames("lesson_2.mp4", names))
+        assertEquals(listOf("other.srt"), companionSubtitleNames("other.mp4", names))
+        assertEquals("lesson_2", subtitleOwnerStem("lesson_2_中文.srt", names))
+    }
+
+    @Test
+    fun extractCopiesOneFileAndMergesSameNames() {
+        val copied = planTagExtract(
+            listOf(source("lesson_中文.srt.tags.json", doc("lesson_中文.srt", entry("aaaaaaaaaaaa", 1, 0.0, "欢迎使用字幕学习播放器", listOf("重点"))))),
+            emptyMap(),
+        )
+        assertEquals(1, copied.writes.size)
+        assertEquals(TagSyncKind.Copied, copied.writes[0].kind)
+        assertEquals("lesson_中文.srt", copied.writes[0].document.subtitleFile)
+
+        val first = doc("lesson_中文.srt", entry("aaaaaaaaaaaa", 1, 0.0, "欢迎使用字幕学习播放器", listOf("重点"), note = "甲"))
+        val second = doc(
+            "lesson_中文.srt",
+            entry("aaaaaaaaaaaa", 1, 0.0, "欢迎使用字幕学习播放器", listOf("新页面"), note = "乙"),
+            entry("bbbbbbbbbbbb", 2, 4.0, "另一句完全不同的字幕正文", listOf("口语")),
+        )
+        val merged = planTagExtract(
+            listOf(
+                ExtractSourceFile("a/lesson_中文.srt.tags.json", "lesson_中文.srt.tags.json", encodeTagDocument(first)),
+                ExtractSourceFile("b/lesson_中文.srt.tags.json", "lesson_中文.srt.tags.json", encodeTagDocument(second)),
+            ),
+            emptyMap(),
+        )
+        assertEquals(TagSyncKind.Merged, merged.writes.single().kind)
+        val entry = merged.writes.single().document.entries.single { it.id == "aaaaaaaaaaaa" }
+        assertEquals(listOf("重点", "新页面"), entry.tags)
+        assertEquals("甲\n乙", entry.note)
+        assertEquals(2, merged.writes.single().document.entries.size)
+
+        val nearby = planTagExtract(
+            listOf(
+                source("lesson_中文.srt.tags.json", doc("lesson_中文.srt", entry("id1111111111", 1, 1.0, "第一句完全不同的字幕正文", listOf("重点")))),
+                source("lesson_中文.srt.tags.json", doc("lesson_中文.srt", entry("id2222222222", 1, 1.0005, "第二句也是完全不同的正文呀", listOf("难点")))),
+            ),
+            emptyMap(),
+        )
+        assertEquals(2, nearby.writes.single().document.entries.size)
+    }
+
+    @Test
+    fun extractMergesIntoExistingAndSkipsBadFiles() {
+        val existing = doc("lesson_中文.srt", entry("aaaaaaaaaaaa", 1, 0.0, "欢迎使用字幕学习播放器", listOf("重点")))
+        val incoming = doc("Lesson_中文.srt", entry("aaaaaaaaaaaa", 1, 0.0, "欢迎使用字幕学习播放器", listOf("难点")))
+        val plan = planTagExtract(
+            listOf(source("Lesson_中文.srt.tags.json", incoming)),
+            existingDocuments = mapOf("lesson_中文.srt.tags.json" to existing),
+            existingFileNames = mapOf("lesson_中文.srt.tags.json" to "lesson_中文.srt.tags.json"),
+        )
+        assertEquals(TagSyncKind.Merged, plan.writes.single().kind)
+        assertEquals("lesson_中文.srt.tags.json", plan.writes.single().fileName)
+        assertEquals(listOf("重点", "难点"), plan.writes.single().document.entries.single().tags)
+
+        val skipped = planTagExtract(
+            listOf(
+                ExtractSourceFile("bad.tags.json", "lesson_中文.srt.tags.json", null),
+                ExtractSourceFile("broken.tags.json", "lesson_中文.srt.tags.json", "{"),
+                ExtractSourceFile("mismatch.tags.json", "lesson_中文.srt.tags.json", encodeTagDocument(doc("other.srt", entry("aaaaaaaaaaaa", 1, 0.0, "欢迎使用字幕学习播放器")))),
+                ExtractSourceFile("empty.tags.json", "lesson_中文.srt.tags.json", """{"version":1,"subtitle_file":"lesson_中文.srt","entries":[]}"""),
+            ),
+            emptyMap(),
+        )
+        assertTrue(skipped.writes.isEmpty())
+        assertEquals(listOf("无法读取", "标签文件无效", "字幕文件名与标签文件不一致", "没有有效内容"), skipped.skips.map { it.reason })
+        assertEquals("来源文件夹里没有标签文件", describeExtractResults(false, emptyList(), emptyList()))
+        assertTrue(sameExtractFolder("primary:Movies", "primary:Movies"))
+        assertFalse(sameExtractFolder("primary:Movies", "primary:Movies/out"))
+        assertTrue(extractSourceInsideDestination("primary:Movies/out/a.tags.json", "primary:Movies", "primary:Movies/out"))
+        assertFalse(extractSourceInsideDestination("primary:Movies/a.tags.json", "primary:Movies", "primary:Movies/out"))
+    }
+
+    private fun doc(subtitleFile: String, vararg entries: TagEntry) =
+        TagDocument(1, subtitleFile, entries.toList())
+
+    private fun source(fileName: String, document: TagDocument) =
+        ExtractSourceFile(fileName, fileName, encodeTagDocument(document))
 }

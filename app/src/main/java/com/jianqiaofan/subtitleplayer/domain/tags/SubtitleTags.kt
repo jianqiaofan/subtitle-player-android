@@ -2,6 +2,8 @@ package com.jianqiaofan.subtitleplayer.domain.tags
 
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
 import com.jianqiaofan.subtitleplayer.domain.model.isMediaFile
+import com.jianqiaofan.subtitleplayer.domain.model.isSubtitleFile
+import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
 import java.math.BigDecimal
 import kotlin.math.abs
 import kotlin.math.round
@@ -14,9 +16,44 @@ private const val TEXT_CLOSE_RATIO = 0.82
 private const val START_TOLERANCE_MS = 1L
 private const val UNIQUE_TEXT_GAP_SEC = 1.0
 
-val PRESET_TAGS = listOf("重点", "难点", "易错", "跟读", "已掌握")
+val TAG_CATEGORIES = listOf(
+    "通用" to listOf("重点", "难点", "易错", "新章节", "新页面", "重要断点", "已掌握", "待复习", "存疑"),
+    "备考" to listOf("真题", "得分点", "技巧", "必背", "口诀", "案例"),
+    "语言学习" to listOf("单词", "语法", "发音", "短语", "地道表达"),
+    "电影" to listOf("佳句", "反复练听", "跟读", "长难句", "俚语", "文化背景", "名场面"),
+)
 
-private val TAG_PRIORITY = listOf("难点", "重点", "易错", "跟读", "已掌握")
+val PRESET_TAGS = TAG_CATEGORIES.flatMap { it.second }
+
+private val TAG_PRIORITY = listOf(
+    "存疑",
+    "难点",
+    "易错",
+    "重点",
+    "待复习",
+    "长难句",
+    "反复练听",
+    "跟读",
+    "真题",
+    "得分点",
+    "必背",
+    "单词",
+    "语法",
+    "发音",
+    "短语",
+    "地道表达",
+    "佳句",
+    "俚语",
+    "技巧",
+    "口诀",
+    "案例",
+    "文化背景",
+    "名场面",
+    "新章节",
+    "新页面",
+    "重要断点",
+    "已掌握",
+)
 
 data class TagPalette(val background: Long, val foreground: Long)
 
@@ -24,18 +61,41 @@ fun tagPalette(name: String): TagPalette = when (name) {
     "重点" -> TagPalette(0xFF6B5420, 0xFFFFD78A)
     "难点" -> TagPalette(0xFF6B3030, 0xFFFFB0A8)
     "易错" -> TagPalette(0xFF6B4520, 0xFFFFC48A)
-    "跟读" -> TagPalette(0xFF1E3D55, 0xFFB9E0FF)
+    "新章节" -> TagPalette(0xFF1E4A48, 0xFF9EE0D6)
+    "新页面" -> TagPalette(0xFF1E3F4A, 0xFF9ED4E0)
+    "重要断点" -> TagPalette(0xFF4A3A1E, 0xFFF0D090)
     "已掌握" -> TagPalette(0xFF1E3D32, 0xFF9DDEB8)
+    "待复习" -> TagPalette(0xFF5A3A1E, 0xFFFFCC88)
+    "存疑" -> TagPalette(0xFF5A2048, 0xFFFFB0D0)
+    "真题" -> TagPalette(0xFF5C2840, 0xFFFFB3C7)
+    "得分点" -> TagPalette(0xFF6B3A28, 0xFFFFC2A8)
+    "技巧" -> TagPalette(0xFF4A3820, 0xFFF0D0A0)
+    "必背" -> TagPalette(0xFF6B2848, 0xFFFFB0C8)
+    "口诀" -> TagPalette(0xFF5A4030, 0xFFF5D0B0)
+    "案例" -> TagPalette(0xFF3D4A28, 0xFFD5E8A8)
+    "单词" -> TagPalette(0xFF243A5C, 0xFFB9D0FF)
+    "语法" -> TagPalette(0xFF2A3058, 0xFFC4C0FF)
+    "发音" -> TagPalette(0xFF1E4558, 0xFFA8E4FF)
+    "短语" -> TagPalette(0xFF243858, 0xFFC8D8FF)
+    "地道表达" -> TagPalette(0xFF30305A, 0xFFD0C8FF)
+    "佳句" -> TagPalette(0xFF3A3058, 0xFFE0C8FF)
+    "反复练听" -> TagPalette(0xFF1A4550, 0xFFA8F0E0)
+    "跟读" -> TagPalette(0xFF1E3D55, 0xFFB9E0FF)
+    "长难句" -> TagPalette(0xFF3A2848, 0xFFE8B8E0)
+    "俚语" -> TagPalette(0xFF4A3040, 0xFFFFC0D8)
+    "文化背景" -> TagPalette(0xFF3A4030, 0xFFE0E8B0)
+    "名场面" -> TagPalette(0xFF4A2840, 0xFFFFC0B0)
     else -> TagPalette(0xFF3A3A3A, 0xFFDDDDDD)
 }
 
-/** Left bar color: 难点 > 重点 > 易错 > 跟读 > 已掌握 > first custom tag. */
+/** Left bar color follows preset priority, then the first custom tag. */
 fun primaryTag(tags: List<String>): String? {
     if (tags.isEmpty()) return null
+    val ordered = orderedTagNames(tags)
     for (name in TAG_PRIORITY) {
-        if (name in tags) return name
+        if (name in ordered) return name
     }
-    return tags.firstOrNull { it !in PRESET_TAGS } ?: tags.first()
+    return ordered.firstOrNull { it !in PRESET_TAGS }
 }
 
 /** Dim body only when 已掌握 is the sole tag. */
@@ -103,6 +163,7 @@ fun subtitleFileNameFromTagFile(tagFileName: String): String? {
 fun isPresetTag(name: String): Boolean = name in PRESET_TAGS
 
 fun normalizeCustomTagName(raw: String): String? {
+    if (raw.any { it == '\n' || it == '\r' || it == '\t' }) return null
     val name = raw.trim()
     if (name.isEmpty() || name.length > CUSTOM_TAG_MAX_LENGTH || name in PRESET_TAGS) return null
     return name
@@ -503,6 +564,23 @@ fun planTagSync(
     )
 }
 
+fun companionSubtitleNames(videoFileName: String, namesInDirectory: List<String>): List<String> {
+    val videoStem = mediaStem(videoFileName)
+    return namesInDirectory.filter { name ->
+        isSubtitleFile(name) && subtitleOwnerStem(name, namesInDirectory) == videoStem
+    }
+}
+
+fun subtitleOwnerStem(subtitleFileName: String, namesInDirectory: List<String>): String? {
+    val subtitleStem = mediaStem(subtitleFileName)
+    return namesInDirectory
+        .filter { isMediaFile(it) }
+        .map { mediaStem(it) }
+        .distinct()
+        .filter { stem -> subtitleStem == stem || subtitleStem.startsWith("${stem}_") }
+        .maxByOrNull { it.length }
+}
+
 fun videoMatchesSubtitle(videoFileName: String, subtitleFileName: String): Boolean {
     val videoStem = videoFileName.substringBeforeLast('.', missingDelimiterValue = videoFileName)
     val subtitleStem = subtitleFileName.substringBeforeLast('.', missingDelimiterValue = subtitleFileName)
@@ -615,6 +693,117 @@ fun describeSyncResults(results: List<TagSyncDecision>): String {
             "${it.subtitleFileName}（${it.reason ?: "跳过"}）"
         },
     ).filter { it.isNotEmpty() }.joinToString("\n\n").ifBlank { "没有需要同步的标签文件" }
+}
+
+data class ExtractSourceFile(
+    val label: String,
+    val fileName: String,
+    val rawText: String?,
+)
+
+data class ExtractWrite(
+    val fileName: String,
+    val kind: TagSyncKind,
+    val document: TagDocument,
+)
+
+data class ExtractSkip(
+    val label: String,
+    val reason: String,
+)
+
+data class ExtractPlan(
+    val foundAny: Boolean,
+    val writes: List<ExtractWrite>,
+    val skips: List<ExtractSkip>,
+)
+
+fun sameExtractFolder(sourceTreeId: String, destTreeId: String): Boolean =
+    sourceTreeId.isNotBlank() && sourceTreeId == destTreeId
+
+/** True when [destTreeId] sits inside the source tree and this file is under that destination. */
+fun extractSourceInsideDestination(sourceDocumentId: String, sourceTreeId: String, destTreeId: String): Boolean {
+    if (sourceTreeId.isBlank() || destTreeId.isBlank() || sourceTreeId == destTreeId) return false
+    val destInsideSource = destTreeId == sourceTreeId || destTreeId.startsWith("$sourceTreeId/")
+    if (!destInsideSource) return false
+    return sourceDocumentId == destTreeId || sourceDocumentId.startsWith("$destTreeId/")
+}
+
+fun planTagExtract(
+    sources: List<ExtractSourceFile>,
+    existingDocuments: Map<String, TagDocument>,
+    existingFileNames: Map<String, String> = emptyMap(),
+    unreadableExistingKeys: Set<String> = emptySet(),
+): ExtractPlan {
+    if (sources.isEmpty()) {
+        return ExtractPlan(foundAny = false, writes = emptyList(), skips = emptyList())
+    }
+    val skips = mutableListOf<ExtractSkip>()
+    val groupOrder = mutableListOf<String>()
+    val firstNames = linkedMapOf<String, String>()
+    val valid = linkedMapOf<String, MutableList<TagDocument>>()
+    for (source in sources) {
+        val key = source.fileName.lowercase()
+        if (key !in firstNames) {
+            firstNames[key] = source.fileName
+            groupOrder += key
+            valid[key] = mutableListOf()
+        }
+        val (document, skip) = readExtractSource(source)
+        if (skip != null) skips += skip else if (document != null) valid.getValue(key) += document
+    }
+    val writes = mutableListOf<ExtractWrite>()
+    for (key in groupOrder) {
+        val docs = valid.getValue(key)
+        if (key in unreadableExistingKeys) {
+            if (docs.isNotEmpty()) {
+                val name = existingFileNames[key] ?: firstNames.getValue(key)
+                skips += ExtractSkip(name, "保存位置里的同名标签无法读取")
+            }
+            continue
+        }
+        if (docs.isEmpty()) continue
+        val outputName = existingFileNames[key] ?: firstNames.getValue(key)
+        val subtitleName = subtitleFileNameFromTagFile(outputName) ?: continue
+        val existing = existingDocuments[key]
+        if (docs.size == 1 && existing == null) {
+            writes += ExtractWrite(
+                outputName,
+                TagSyncKind.Copied,
+                docs[0].copy(version = TAG_DOCUMENT_VERSION, subtitleFile = subtitleName),
+            )
+        } else {
+            var combined = existing?.entries.orEmpty()
+            for (doc in docs) combined = mergeTagEntries(combined, doc.entries)
+            writes += ExtractWrite(
+                outputName,
+                TagSyncKind.Merged,
+                TagDocument(TAG_DOCUMENT_VERSION, subtitleName, combined),
+            )
+        }
+    }
+    return ExtractPlan(foundAny = true, writes = writes, skips = skips)
+}
+
+fun describeExtractResults(foundAny: Boolean, writes: List<ExtractWrite>, skips: List<ExtractSkip>): String {
+    if (!foundAny) return "来源文件夹里没有标签文件"
+    val copied = writes.count { it.kind == TagSyncKind.Copied }
+    val merged = writes.count { it.kind == TagSyncKind.Merged }
+    val head = "直接复制 $copied 个\n合并 $merged 个\n跳过 ${skips.size} 个"
+    if (skips.isEmpty()) return head
+    return head + "\n\n" + skips.joinToString("\n") { "${it.label}（${it.reason}）" }
+}
+
+private fun readExtractSource(source: ExtractSourceFile): Pair<TagDocument?, ExtractSkip?> {
+    if (source.rawText == null) return null to ExtractSkip(source.label, "无法读取")
+    val subtitleName = subtitleFileNameFromTagFile(source.fileName)
+        ?: return null to ExtractSkip(source.label, "标签文件无效")
+    val parsed = parseTagDocument(source.rawText) ?: return null to ExtractSkip(source.label, "标签文件无效")
+    if (parsed.subtitleFile != subtitleName) {
+        return null to ExtractSkip(source.label, "字幕文件名与标签文件不一致")
+    }
+    if (parsed.entries.isEmpty()) return null to ExtractSkip(source.label, "没有有效内容")
+    return parsed to null
 }
 
 private fun findMergeTarget(local: List<TagEntry>, incoming: TagEntry, used: Set<Int>): Int? {
