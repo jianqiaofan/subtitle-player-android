@@ -196,7 +196,9 @@ class SubtitleTagsTest {
             cues,
             TagEdit(listOf(1), emptyList(), "", applyNote = true),
         )
-        assertFalse(1 in cleared.attached)
+        assertTrue(1 in cleared.attached)
+        assertEquals(emptyList<String>(), cleared.attached.getValue(1).tags)
+        assertTrue(cleared.attached.getValue(1).tagOps.any { it.name == "难点" && !it.present })
     }
 
     @Test

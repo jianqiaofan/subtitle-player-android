@@ -1,10 +1,15 @@
 package com.jianqiaofan.subtitleplayer.domain.tags
 
+import com.jianqiaofan.subtitleplayer.domain.json.JsonValue
+import com.jianqiaofan.subtitleplayer.domain.json.jsonNumber
+import com.jianqiaofan.subtitleplayer.domain.json.jsonString
+import com.jianqiaofan.subtitleplayer.domain.json.parseJson
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
 import com.jianqiaofan.subtitleplayer.domain.model.isMediaFile
 import com.jianqiaofan.subtitleplayer.domain.model.isSubtitleFile
 import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
-import java.math.BigDecimal
+import com.jianqiaofan.subtitleplayer.domain.time.isNewerOrEqualUtc
+import com.jianqiaofan.subtitleplayer.domain.time.utcTimestamp
 import kotlin.math.abs
 import kotlin.math.round
 
@@ -102,6 +107,12 @@ fun primaryTag(tags: List<String>): String? {
 fun subtitleBodyDimmed(tags: List<String>): Boolean =
     tags.size == 1 && tags[0] == "已掌握"
 
+data class TagOp(
+    val name: String,
+    val present: Boolean,
+    val at: String,
+)
+
 data class TagEntry(
     val id: String,
     val index: Int,
@@ -110,7 +121,49 @@ data class TagEntry(
     val text: String,
     val tags: List<String>,
     val note: String,
+    val tagOps: List<TagOp> = emptyList(),
+    val noteAt: String = "",
 )
+
+fun tagNow(): String = utcTimestamp()
+
+fun latestTagOps(ops: List<TagOp>): Map<String, TagOp> {
+    val latest = linkedMapOf<String, TagOp>()
+    for (op in ops) {
+        val name = op.name.trim()
+        if (name.isEmpty()) continue
+        val prev = latest[name]
+        if (prev == null || isNewerOrEqualUtc(op.at, prev.at)) latest[name] = op.copy(name = name)
+    }
+    return latest
+}
+
+fun visibleTagNames(ops: List<TagOp>): List<String> =
+    orderedTagNames(latestTagOps(ops).filterValues { it.present }.keys.toList())
+
+/** Tags array stays for older files. Ops override the names they mention. */
+fun resolveVisibleTags(tags: List<String>, ops: List<TagOp>): List<String> {
+    if (ops.isEmpty()) return orderedTagNames(tags)
+    val latest = latestTagOps(ops)
+    val names = orderedTagNames(tags).toMutableSet()
+    for ((name, op) in latest) {
+        if (op.present) names += name else names -= name
+    }
+    return orderedTagNames(names.toList())
+}
+
+fun reviseTagOps(existing: List<TagOp>, before: List<String>, after: List<String>, at: String): List<TagOp> {
+    val ops = existing.toMutableList()
+    val beforeSet = before.toSet()
+    val afterSet = after.toSet()
+    for (name in after) {
+        if (name !in beforeSet) ops += TagOp(name, true, at)
+    }
+    for (name in before) {
+        if (name !in afterSet) ops += TagOp(name, false, at)
+    }
+    return ops
+}
 
 data class TagDocument(
     val version: Int,
@@ -295,7 +348,7 @@ fun alignmentToDocument(subtitleFileName: String, alignment: TagAlignment): TagD
         alignment.attached.toSortedMap().values.forEach { add(it) }
         addAll(alignment.unmatched)
     }.map { it.copy(tags = orderedTagNames(it.tags)) }
-        .filter { it.tags.isNotEmpty() || it.note.isNotBlank() }
+        .filter { it.tags.isNotEmpty() || it.note.isNotBlank() || it.tagOps.isNotEmpty() }
     if (entries.isEmpty()) return null
     return TagDocument(TAG_DOCUMENT_VERSION, subtitleFileName, entries)
 }
@@ -311,6 +364,7 @@ fun applyTagEdit(
     alignment: TagAlignment,
     cues: List<SubtitleCue>,
     edit: TagEdit,
+    at: String = tagNow(),
     newId: () -> String = { newTagId() },
 ): TagAlignment {
     val tags = orderedTagNames(edit.tags)
@@ -319,7 +373,13 @@ fun applyTagEdit(
         val cue = cues.getOrNull(cueIndex) ?: continue
         val existing = attached[cueIndex]
         val note = if (edit.applyNote) edit.note else existing?.note.orEmpty()
-        if (tags.isEmpty() && note.isBlank()) {
+        val noteAt = when {
+            existing == null -> if (note.isBlank()) "" else at
+            !edit.applyNote || note == existing.note -> existing.noteAt
+            else -> at
+        }
+        val ops = reviseTagOps(existing?.tagOps.orEmpty(), existing?.tags.orEmpty(), tags, at)
+        if (tags.isEmpty() && note.isBlank() && ops.isEmpty()) {
             attached.remove(cueIndex)
         } else if (existing == null) {
             attached[cueIndex] = TagEntry(
@@ -330,6 +390,8 @@ fun applyTagEdit(
                 text = cue.text,
                 tags = tags,
                 note = note,
+                tagOps = ops,
+                noteAt = noteAt,
             )
         } else {
             attached[cueIndex] = existing.copy(
@@ -339,21 +401,37 @@ fun applyTagEdit(
                 text = cue.text,
                 tags = tags,
                 note = note,
+                tagOps = ops,
+                noteAt = noteAt,
             )
         }
     }
     return alignment.copy(attached = attached)
 }
 
-fun clearTags(alignment: TagAlignment, cueIndices: Collection<Int>): TagAlignment =
-    alignment.copy(attached = alignment.attached - cueIndices.toSet())
+fun clearTags(alignment: TagAlignment, cueIndices: Collection<Int>, at: String = tagNow()): TagAlignment {
+    val attached = alignment.attached.toMutableMap()
+    for (index in cueIndices) {
+        val existing = attached[index] ?: continue
+        val ops = reviseTagOps(existing.tagOps, existing.tags, emptyList(), at)
+        if (existing.note.isBlank() && ops.isEmpty()) {
+            attached.remove(index)
+        } else {
+            attached[index] = existing.copy(tags = emptyList(), tagOps = ops)
+        }
+    }
+    return alignment.copy(attached = attached)
+}
 
-fun updateNote(alignment: TagAlignment, cueIndex: Int, note: String): TagAlignment {
+fun updateNote(alignment: TagAlignment, cueIndex: Int, note: String, at: String = tagNow()): TagAlignment {
     val existing = alignment.attached[cueIndex] ?: return alignment
-    if (existing.tags.isEmpty() && note.isBlank()) {
+    val noteAt = if (note == existing.note) existing.noteAt else at
+    if (existing.tags.isEmpty() && note.isBlank() && existing.tagOps.isEmpty()) {
         return alignment.copy(attached = alignment.attached - cueIndex)
     }
-    return alignment.copy(attached = alignment.attached + (cueIndex to existing.copy(note = note)))
+    return alignment.copy(
+        attached = alignment.attached + (cueIndex to existing.copy(note = note, noteAt = noteAt)),
+    )
 }
 
 fun attachUnmatchedToCue(
@@ -361,6 +439,7 @@ fun attachUnmatchedToCue(
     entryId: String,
     cueIndex: Int,
     cue: SubtitleCue,
+    at: String = tagNow(),
     newId: () -> String = { newTagId() },
 ): TagAlignment {
     val incoming = alignment.unmatched.find { it.id == entryId } ?: return alignment
@@ -373,7 +452,18 @@ fun attachUnmatchedToCue(
         existing.note.isBlank() -> incoming.note
         else -> existing.note
     }
-    if (mergedTags.isEmpty() && mergedNote.isBlank()) {
+    val noteAt = when {
+        existing == null -> incoming.noteAt
+        existing.note.isNotBlank() -> existing.noteAt
+        else -> incoming.noteAt.ifBlank { existing.noteAt }
+    }
+    val ops = reviseTagOps(
+        (existing?.tagOps.orEmpty()) + incoming.tagOps,
+        existing?.tags.orEmpty(),
+        mergedTags,
+        at,
+    )
+    if (mergedTags.isEmpty() && mergedNote.isBlank() && ops.isEmpty()) {
         return alignment.copy(unmatched = alignment.unmatched.filterNot { it.id == entryId })
     }
     val entry = if (existing == null) {
@@ -385,9 +475,20 @@ fun attachUnmatchedToCue(
             text = cue.text,
             tags = mergedTags,
             note = mergedNote,
+            tagOps = ops,
+            noteAt = noteAt,
         )
     } else {
-        existing.copy(tags = mergedTags, note = mergedNote, index = cue.index, start = cue.start, end = cue.end, text = cue.text)
+        existing.copy(
+            tags = mergedTags,
+            note = mergedNote,
+            noteAt = noteAt,
+            tagOps = ops,
+            index = cue.index,
+            start = cue.start,
+            end = cue.end,
+            text = cue.text,
+        )
     }
     return alignment.copy(
         attached = alignment.attached + (cueIndex to entry),
@@ -525,6 +626,12 @@ fun mergeTagEntries(local: List<TagEntry>, incoming: List<TagEntry>): List<TagEn
             merged[index] = base.copy(
                 tags = mergeTagNames(base.tags, entry.tags),
                 note = mergeNotes(base.note, entry.note),
+                tagOps = base.tagOps + entry.tagOps,
+                noteAt = if (isNewerOrEqualUtc(entry.noteAt, base.noteAt) && entry.noteAt.isNotBlank()) {
+                    entry.noteAt
+                } else {
+                    base.noteAt
+                },
             )
         }
     }
@@ -623,7 +730,7 @@ fun parseTagDocument(raw: String, expectedSubtitleFile: String? = null): TagDocu
     val text = raw.removePrefix("\uFEFF").trim()
     if (text.isEmpty()) return null
     val root = try {
-        JsonParser(text).parse() as? JsonValue.Obj
+        parseJson(text) as? JsonValue.Obj
     } catch (_: Exception) {
         null
     } ?: return null
@@ -652,7 +759,9 @@ fun encodeTagDocument(document: TagDocument): String = buildString {
         append("      \"end\": ${jsonNumber(entry.end)},\n")
         append("      \"text\": ${jsonString(entry.text)},\n")
         append("      \"tags\": [${entry.tags.joinToString(", ") { jsonString(it) }}],\n")
-        append("      \"note\": ${jsonString(entry.note)}\n")
+        append("      \"tag_ops\": [${encodeTagOps(entry.tagOps)}],\n")
+        append("      \"note\": ${jsonString(entry.note)},\n")
+        append("      \"note_at\": ${jsonString(entry.noteAt)}\n")
         append("    }")
         if (index != document.entries.lastIndex) append(",")
         append("\n")
@@ -667,8 +776,13 @@ private fun parseEntry(obj: JsonValue.Obj): TagEntry? {
     val end = (obj.map["end"] as? JsonValue.Num)?.value ?: return null
     val text = (obj.map["text"] as? JsonValue.Str)?.value ?: return null
     val id = ((obj.map["id"] as? JsonValue.Str)?.value).orEmpty().ifBlank { newTagId() }
-    val tags = when (val node = obj.map["tags"]) {
-        is JsonValue.Arr -> orderedTagNames(node.items.mapNotNull { (it as? JsonValue.Str)?.value })
+    val rawTags = when (val node = obj.map["tags"]) {
+        is JsonValue.Arr -> node.items.mapNotNull { (it as? JsonValue.Str)?.value }
+        null -> emptyList()
+        else -> return null
+    }
+    val tagOps = when (val node = obj.map["tag_ops"]) {
+        is JsonValue.Arr -> node.items.mapNotNull { parseTagOp(it) }
         null -> emptyList()
         else -> return null
     }
@@ -677,9 +791,29 @@ private fun parseEntry(obj: JsonValue.Obj): TagEntry? {
         null -> ""
         else -> return null
     }
-    if (tags.isEmpty() && note.isBlank()) return null
-    return TagEntry(id, index, start, end, text, tags, note)
+    val noteAt = when (val node = obj.map["note_at"]) {
+        is JsonValue.Str -> node.value
+        null -> ""
+        else -> return null
+    }
+    val tags = resolveVisibleTags(rawTags, tagOps)
+    if (tags.isEmpty() && note.isBlank() && tagOps.isEmpty()) return null
+    return TagEntry(id, index, start, end, text, tags, note, tagOps, noteAt)
 }
+
+private fun parseTagOp(node: JsonValue): TagOp? {
+    val obj = node as? JsonValue.Obj ?: return null
+    val name = (obj.map["name"] as? JsonValue.Str)?.value?.trim().orEmpty()
+    if (name.isEmpty()) return null
+    val present = (obj.map["present"] as? JsonValue.Bool)?.value ?: return null
+    val at = (obj.map["at"] as? JsonValue.Str)?.value.orEmpty()
+    return TagOp(name, present, at)
+}
+
+private fun encodeTagOps(ops: List<TagOp>): String =
+    ops.joinToString(", ") { op ->
+        "{\"name\":${jsonString(op.name)},\"present\":${if (op.present) "true" else "false"},\"at\":${jsonString(op.at)}}"
+    }
 
 fun describeSyncResults(results: List<TagSyncDecision>): String {
     fun block(title: String, items: List<TagSyncDecision>, line: (TagSyncDecision) -> String): String {
@@ -869,156 +1003,3 @@ private fun findLongestMatch(
     return Triple(bestI, bestJ, bestSize)
 }
 
-private fun jsonString(value: String): String = buildString {
-    append('"')
-    for (ch in value) {
-        when (ch) {
-            '\\' -> append("\\\\")
-            '"' -> append("\\\"")
-            '\n' -> append("\\n")
-            '\r' -> append("\\r")
-            '\t' -> append("\\t")
-            else -> if (ch.code < 0x20) append("\\u%04x".format(ch.code)) else append(ch)
-        }
-    }
-    append('"')
-}
-
-private fun jsonNumber(value: Double): String {
-    if (value.isNaN() || value.isInfinite()) return "0"
-    return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
-}
-
-private sealed class JsonValue {
-    data class Obj(val map: Map<String, JsonValue>) : JsonValue()
-    data class Arr(val items: List<JsonValue>) : JsonValue()
-    data class Str(val value: String) : JsonValue()
-    data class Num(val value: Double) : JsonValue()
-}
-
-private class JsonParser(private val text: String) {
-    private var i = 0
-
-    fun parse(): JsonValue {
-        skip()
-        val value = readValue()
-        skip()
-        if (i != text.length) error("trailing")
-        return value
-    }
-
-    private fun readValue(): JsonValue {
-        skip()
-        return when (val ch = peek()) {
-            '{' -> readObject()
-            '[' -> readArray()
-            '"' -> JsonValue.Str(readString())
-            else -> if (ch == '-' || ch.isDigit()) readNumber() else error("value")
-        }
-    }
-
-    private fun readObject(): JsonValue.Obj {
-        expect('{')
-        val map = linkedMapOf<String, JsonValue>()
-        skip()
-        if (peek() == '}') {
-            i++
-            return JsonValue.Obj(map)
-        }
-        while (true) {
-            skip()
-            val key = readString()
-            skip()
-            expect(':')
-            map[key] = readValue()
-            skip()
-            when (peek()) {
-                ',' -> i++
-                '}' -> {
-                    i++
-                    return JsonValue.Obj(map)
-                }
-                else -> error("object")
-            }
-        }
-    }
-
-    private fun readArray(): JsonValue.Arr {
-        expect('[')
-        val items = mutableListOf<JsonValue>()
-        skip()
-        if (peek() == ']') {
-            i++
-            return JsonValue.Arr(items)
-        }
-        while (true) {
-            items += readValue()
-            skip()
-            when (peek()) {
-                ',' -> i++
-                ']' -> {
-                    i++
-                    return JsonValue.Arr(items)
-                }
-                else -> error("array")
-            }
-        }
-    }
-
-    private fun readString(): String {
-        expect('"')
-        val out = StringBuilder()
-        while (i < text.length) {
-            val ch = text[i++]
-            when (ch) {
-                '"' -> return out.toString()
-                '\\' -> {
-                    val esc = text[i++]
-                    when (esc) {
-                        '"', '\\', '/' -> out.append(esc)
-                        'b' -> out.append('\b')
-                        'f' -> out.append('\u000C')
-                        'n' -> out.append('\n')
-                        'r' -> out.append('\r')
-                        't' -> out.append('\t')
-                        'u' -> {
-                            val hex = text.substring(i, i + 4)
-                            i += 4
-                            out.append(hex.toInt(16).toChar())
-                        }
-                        else -> error("escape")
-                    }
-                }
-                else -> out.append(ch)
-            }
-        }
-        error("string")
-    }
-
-    private fun readNumber(): JsonValue.Num {
-        val start = i
-        if (peek() == '-') i++
-        while (i < text.length && text[i].isDigit()) i++
-        if (i < text.length && text[i] == '.') {
-            i++
-            while (i < text.length && text[i].isDigit()) i++
-        }
-        if (i < text.length && (text[i] == 'e' || text[i] == 'E')) {
-            i++
-            if (i < text.length && (text[i] == '+' || text[i] == '-')) i++
-            while (i < text.length && text[i].isDigit()) i++
-        }
-        return JsonValue.Num(text.substring(start, i).toDouble())
-    }
-
-    private fun skip() {
-        while (i < text.length && text[i].isWhitespace()) i++
-    }
-
-    private fun peek(): Char = text.getOrNull(i) ?: error("eof")
-
-    private fun expect(ch: Char) {
-        if (peek() != ch) error("expected $ch")
-        i++
-    }
-}

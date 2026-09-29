@@ -1,0 +1,3 @@
+# 复制本文件为仓库根目录的 publish.local.properties。该文件已忽略，不要提交。
+# 值是桌面版仓库根目录，目录里要有 subtitle_server\deploy\publish-android.ps1
+desktopRepo=D:\path\to\subtitle-player

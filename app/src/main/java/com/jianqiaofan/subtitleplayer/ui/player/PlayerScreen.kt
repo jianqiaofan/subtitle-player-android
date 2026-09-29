@@ -706,6 +706,14 @@ fun PlayerScreen(
             confirmButton = { TextButton(onClick = { reportText = null }) { Text("关闭") } },
         )
     }
+    state.cloudPrompt?.let { prompt ->
+        com.jianqiaofan.subtitleplayer.ui.cloud.CloudPromptDialog(
+            prompt = prompt,
+            onAccept = viewModel::acceptCloudPrompt,
+            onDismiss = viewModel::dismissCloudPrompt,
+            onPickPerson = viewModel::acceptCloudShare,
+        )
+    }
 }
 
 @Composable

@@ -65,6 +65,7 @@ fun LibraryScreen(
     onOpenMedia: (uri: String, name: String) -> Unit,
     onBrowseMedia: () -> Unit,
     onChooseFolder: () -> Unit,
+    onOpenAccount: () -> Unit,
     showBack: Boolean,
     onBack: () -> Unit,
     onExit: () -> Unit,
@@ -109,6 +110,7 @@ fun LibraryScreen(
                         Icon(Icons.Outlined.FolderOpen, contentDescription = null)
                         Text("选择文件夹", modifier = Modifier.padding(start = 6.dp))
                     }
+                    TextButton(onClick = onOpenAccount) { Text("账号") }
                     TextButton(onClick = onExit) { Text("退出") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

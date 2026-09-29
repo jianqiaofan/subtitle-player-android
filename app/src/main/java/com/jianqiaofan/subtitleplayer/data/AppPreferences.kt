@@ -7,6 +7,8 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.jianqiaofan.subtitleplayer.domain.cloud.DEFAULT_CLOUD_SERVER
+import com.jianqiaofan.subtitleplayer.domain.cloud.StoredCloudAccount
 import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSideLandscape
 import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSidePortrait
 import com.jianqiaofan.subtitleplayer.domain.display.OnScreenSubtitlePosition
@@ -204,6 +206,27 @@ class AppPreferences(private val context: Context) {
     suspend fun loadPosition(mediaUri: String): Long? =
         decodePlayback(context.dataStore.data.first()[KEY_POSITIONS].orEmpty())[mediaUri]?.positionMs
 
+    suspend fun cloudAccountOnce(): StoredCloudAccount {
+        val prefs = context.dataStore.data.first()
+        return StoredCloudAccount(
+            server = prefs[KEY_CLOUD_SERVER]?.ifBlank { null } ?: DEFAULT_CLOUD_SERVER,
+            username = prefs[KEY_CLOUD_USERNAME].orEmpty(),
+            password = prefs[KEY_CLOUD_PASSWORD].orEmpty(),
+            token = prefs[KEY_CLOUD_TOKEN].orEmpty(),
+            tokenUsername = prefs[KEY_CLOUD_TOKEN_USER].orEmpty(),
+        )
+    }
+
+    suspend fun saveCloudSession(server: String, username: String, password: String, token: String) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_CLOUD_SERVER] = server
+            prefs[KEY_CLOUD_USERNAME] = username
+            prefs[KEY_CLOUD_PASSWORD] = password
+            prefs[KEY_CLOUD_TOKEN] = token
+            prefs[KEY_CLOUD_TOKEN_USER] = username
+        }
+    }
+
     companion object {
         const val MAX_RECENTS = 8
         const val MAX_RECENT_MEDIA = 15
@@ -232,6 +255,11 @@ class AppPreferences(private val context: Context) {
         private val KEY_IMMERSIVE_SIZE = intPreferencesKey("immersive_subtitle_list_size_percent")
         private val KEY_LIST_DENSITY = stringPreferencesKey("subtitle_list_density")
         private val KEY_ORIENTATION = stringPreferencesKey("preferred_orientation")
+        private val KEY_CLOUD_SERVER = stringPreferencesKey("cloud_server")
+        private val KEY_CLOUD_USERNAME = stringPreferencesKey("cloud_username")
+        private val KEY_CLOUD_PASSWORD = stringPreferencesKey("cloud_password")
+        private val KEY_CLOUD_TOKEN = stringPreferencesKey("cloud_token")
+        private val KEY_CLOUD_TOKEN_USER = stringPreferencesKey("cloud_token_user")
 
         private fun encodeFolders(folders: List<RecentFolder>): String =
             folders.joinToString("\n") {

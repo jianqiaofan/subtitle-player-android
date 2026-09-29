@@ -20,6 +20,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
+import com.jianqiaofan.subtitleplayer.ui.cloud.CloudAccountScreen
+import com.jianqiaofan.subtitleplayer.ui.cloud.CloudLibraryScreen
 import com.jianqiaofan.subtitleplayer.ui.edit.EditSubtitleScreen
 import com.jianqiaofan.subtitleplayer.ui.library.FolderPickerScreen
 import com.jianqiaofan.subtitleplayer.ui.library.LibraryScreen
@@ -32,6 +34,8 @@ import com.jianqiaofan.subtitleplayer.ui.theme.WindowBackground
 
 object Routes {
     const val Library = "library"
+    const val CloudAccount = "cloudAccount"
+    const val CloudLibrary = "cloudLibrary"
     const val MediaBrowser = "mediaBrowser"
     const val FolderPicker = "folderPicker"
     const val Player = "player/{mediaUri}/{mediaName}"
@@ -74,6 +78,7 @@ fun SubtitlePlayerApp() {
                     },
                     onBrowseMedia = { navController.navigate(Routes.MediaBrowser) },
                     onChooseFolder = { navController.navigate(Routes.FolderPicker) },
+                    onOpenAccount = { navController.navigate(Routes.CloudAccount) },
                     showBack = fromPlayer,
                     onBack = { navController.popBackStack() },
                     onExit = { activity?.finish() },
@@ -91,6 +96,15 @@ fun SubtitlePlayerApp() {
             }
             composable(Routes.FolderPicker) {
                 FolderPickerScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.CloudAccount) {
+                CloudAccountScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenLibrary = { navController.navigate(Routes.CloudLibrary) },
+                )
+            }
+            composable(Routes.CloudLibrary) {
+                CloudLibraryScreen(onBack = { navController.popBackStack() })
             }
             composable(
                 route = Routes.Player,

@@ -15,7 +15,10 @@ import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
+import com.jianqiaofan.subtitleplayer.data.CloudRepository
 import com.jianqiaofan.subtitleplayer.data.MediaLibrary
+import com.jianqiaofan.subtitleplayer.domain.cloud.CloudAnswer
+import com.jianqiaofan.subtitleplayer.domain.cloud.CloudPrompt
 import com.jianqiaofan.subtitleplayer.data.SubtitleDocuments
 import com.jianqiaofan.subtitleplayer.data.TagDocuments
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
@@ -89,6 +92,7 @@ data class PlayerUiState(
     val folderTreeUri: String? = null,
     val message: String? = null,
     val playError: String? = null,
+    val cloudPrompt: CloudPrompt? = null,
 )
 
 class PlayerViewModel(
@@ -108,6 +112,7 @@ class PlayerViewModel(
     private var snapshotCues: List<SubtitleCue> = emptyList()
     private var contentTreeUri: Uri? = null
     private var contentDirectoryUri: Uri? = null
+    private var cloudAnswer: kotlinx.coroutines.CompletableDeferred<CloudAnswer>? = null
 
     val player: ExoPlayer = ExoPlayer.Builder(application)
         .setRenderersFactory(DefaultRenderersFactory(application).setEnableDecoderFallback(true))
@@ -428,6 +433,18 @@ class PlayerViewModel(
         _state.update { it.copy(message = null, playError = null) }
     }
 
+    fun acceptCloudPrompt() {
+        cloudAnswer?.complete(CloudAnswer.Accept)
+    }
+
+    fun dismissCloudPrompt() {
+        cloudAnswer?.complete(CloudAnswer.Dismiss)
+    }
+
+    fun acceptCloudShare(username: String) {
+        cloudAnswer?.complete(CloudAnswer.Person(username))
+    }
+
     fun showTransientMessage(text: String) {
         _state.update { it.copy(message = text) }
     }
@@ -548,28 +565,71 @@ class PlayerViewModel(
         val preferred = autoSelectTrack(tracks)
         if (preferred?.displayName == "同步") {
             loadTrack(preferred)
-            return
-        }
-        var loaded = false
-        for (track in tracks) {
-            val format = subtitleFormatOf(track.fileName) ?: continue
-            val cues = subtitles.readCues(Uri.parse(track.documentUri), format)
-            if (cues.isNotEmpty()) {
-                _state.update { it.copy(selectedTrack = track, cues = cues) }
-                loadTags(track, cues, resetFilter = true)
-                loaded = true
-                break
+        } else {
+            var loaded = false
+            for (track in tracks) {
+                val format = subtitleFormatOf(track.fileName) ?: continue
+                val cues = subtitles.readCues(Uri.parse(track.documentUri), format)
+                if (cues.isNotEmpty()) {
+                    _state.update { it.copy(selectedTrack = track, cues = cues) }
+                    loadTags(track, cues, resetFilter = true)
+                    loaded = true
+                    break
+                }
+            }
+            if (!loaded) {
+                _state.update {
+                    it.copy(
+                        selectedTrack = preferred,
+                        cues = emptyList(),
+                        message = if (tracks.isEmpty()) "未找到字幕" else null,
+                    )
+                }
             }
         }
-        if (!loaded) {
-            _state.update {
-                it.copy(
-                    selectedTrack = preferred,
-                    cues = emptyList(),
-                    message = if (tracks.isEmpty()) "未找到字幕" else null,
-                )
-            }
+        if (writable) cloudCheck(resolvedName)
+    }
+
+    private suspend fun cloudCheck(resolvedName: String) {
+        val tree = contentTreeUri ?: return
+        val directory = contentDirectoryUri ?: return
+        try {
+            val result = CloudRepository(getApplication()).openSync(
+                mediaUri = Uri.parse(mediaUriString),
+                mediaName = resolvedName,
+                treeUri = tree,
+                directoryUri = directory,
+            ) { prompt -> awaitCloudPrompt(prompt) }
+            if (result.subtitlesChanged || result.tagsChanged) reloadSubtitles(resolvedName)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
         }
+    }
+
+    private suspend fun awaitCloudPrompt(prompt: CloudPrompt): CloudAnswer {
+        val deferred = kotlinx.coroutines.CompletableDeferred<CloudAnswer>()
+        cloudAnswer = deferred
+        _state.update { it.copy(cloudPrompt = prompt) }
+        return try {
+            deferred.await()
+        } finally {
+            if (cloudAnswer === deferred) cloudAnswer = null
+            _state.update { it.copy(cloudPrompt = null) }
+        }
+    }
+
+    private suspend fun reloadSubtitles(resolvedName: String) {
+        val tree = contentTreeUri ?: return
+        val directory = contentDirectoryUri ?: return
+        val tracks = findSubtitlesForMedia(
+            resolvedName,
+            library.listSubtitleFilesIn(tree, directory),
+        )
+        val previous = _state.value.selectedTrack?.fileName
+        _state.update { it.copy(tracks = tracks) }
+        val next = tracks.find { it.fileName == previous } ?: autoSelectTrack(tracks) ?: return
+        loadTrack(next)
     }
 
     private suspend fun loadTrack(track: SubtitleTrack) {

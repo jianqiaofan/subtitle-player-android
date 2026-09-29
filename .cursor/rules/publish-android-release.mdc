@@ -1,0 +1,22 @@
+---
+description: 用户明确要求打包并上传安卓安装包、发布应用更新时，执行 scripts/publish-release.ps1
+alwaysApply: true
+---
+
+# 打包上传应用更新
+
+仅当用户明确要求打包上传、发布更新，或让手机通过「安装更新」拿到新包时执行。平时改代码不要发版，也不要提交 git，除非用户另外要求。
+
+在本仓库根目录执行：
+
+```powershell
+powershell -File scripts\publish-release.ps1 -Notes "用户给出的更新说明"
+```
+
+- 用户指定了版本名时加上 `-VersionName "0.1.2"`。
+- 说明用用户的原话。用户没写时，把这一版改动概括成一句中文，不要留空。
+- 脚本会把 `versionCode` 加 1、打已签名正式包，并把 `scripts/publish-android.ps1` 复制到桌面仓库的 `subtitle_server/deploy/` 后再执行。没有桌面仓库时，克隆到上一级目录的 `subtitle-player`。细节见 `发布更新.md`。
+- 已有 `publish.local.properties` 时用其中的 `desktopRepo`。不要改字幕服务器的 Nginx 或数据库。
+- 构建失败时脚本会把版本号改回去。上传失败时版本号保留，用同一说明追加 `-UploadOnly` 重试，不要再次加版本号。
+- 不要改字幕服务器、Nginx 或数据库，不要把签名密码写进对话、文档或 git。
+- 完成后告诉用户新的 versionCode、versionName，以及在手机账号页点「安装更新」。
