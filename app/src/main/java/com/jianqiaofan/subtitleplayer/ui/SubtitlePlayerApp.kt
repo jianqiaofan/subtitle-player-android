@@ -85,12 +85,31 @@ fun SubtitlePlayerApp() {
                 )
             }
             composable(Routes.MediaBrowser) {
+                val previous = navController.previousBackStackEntry
+                val playerEntry = previous?.takeIf { it.destination.route == Routes.Player }
+                val playerViewModel = playerEntry?.let { entry ->
+                    val mediaUri = decodeNavArg(entry.arguments?.getString("mediaUri").orEmpty())
+                    val mediaName = decodeNavArg(entry.arguments?.getString("mediaName").orEmpty())
+                    viewModel<PlayerViewModel>(
+                        viewModelStoreOwner = entry,
+                        factory = PlayerViewModel.factory(app, mediaUri, mediaName),
+                    )
+                }
+                val leavingPlayer = playerEntry != null
                 MediaBrowserScreen(
                     onBack = { navController.popBackStack() },
                     onOpen = { uri, name ->
-                        navController.navigate(Routes.player(uri, name)) {
-                            popUpTo(Routes.Library) { inclusive = false }
+                        val openNext = {
+                            navController.navigate(Routes.player(uri, name)) {
+                                if (leavingPlayer) {
+                                    popUpTo(Routes.Player) { inclusive = true }
+                                } else {
+                                    popUpTo(Routes.Library) { inclusive = false }
+                                }
+                            }
                         }
+                        val player = playerViewModel
+                        if (player != null) player.requestLeave(openNext) else openNext()
                     },
                 )
             }

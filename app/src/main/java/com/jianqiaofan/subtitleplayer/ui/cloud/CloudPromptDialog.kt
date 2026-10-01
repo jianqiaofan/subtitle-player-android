@@ -1,9 +1,11 @@
 package com.jianqiaofan.subtitleplayer.ui.cloud
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -27,6 +29,7 @@ fun CloudPromptDialog(
     onAccept: () -> Unit,
     onDismiss: () -> Unit,
     onPickPerson: (String) -> Unit,
+    onKeepCopy: (Boolean) -> Unit = {},
 ) {
     when (prompt) {
         is CloudPrompt.Subtitles -> ChoiceDialog(
@@ -45,6 +48,7 @@ fun CloudPromptDialog(
             onDismiss = onDismiss,
         )
         is CloudPrompt.Shares -> ShareDialog(prompt, onPickPerson, onDismiss)
+        is CloudPrompt.SubtitleConflict -> ConflictDialog(prompt, onKeepCopy, onDismiss)
     }
 }
 
@@ -63,6 +67,50 @@ private fun ChoiceDialog(
         confirmButton = { TextButton(onClick = onConfirm) { Text(confirm) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun ConflictDialog(
+    prompt: CloudPrompt.SubtitleConflict,
+    onKeepCopy: (Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var keepBundle by rememberSaveable { mutableStateOf(true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择要保留的字幕") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text(prompt.fileName)
+                CopyChoice("配套文件夹里的", prompt.bundle, keepBundle, { keepBundle = true })
+                CopyChoice("视频旁边的", prompt.beside, !keepBundle, { keepBundle = false })
+                Text("取消则这次先用配套文件夹里的那份，下次打开还会再问。另一份先留着。")
+            }
+        },
+        confirmButton = { TextButton(onClick = { onKeepCopy(keepBundle) }) { Text("保留所选") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun CopyChoice(
+    title: String,
+    info: com.jianqiaofan.subtitleplayer.domain.cloud.FileCopyInfo,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(vertical = 6.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.Top,
+    ) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Column {
+            Text(title, color = if (selected) AccentPurple else androidx.compose.ui.graphics.Color.Unspecified)
+            Text(info.path)
+            Text("创建时间：${info.createdLabel}")
+            Text("最后更新：${info.modifiedLabel}")
+        }
+    }
 }
 
 @Composable

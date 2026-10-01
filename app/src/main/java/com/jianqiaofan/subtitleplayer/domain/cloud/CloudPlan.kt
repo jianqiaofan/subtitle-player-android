@@ -8,7 +8,7 @@ import java.time.ZoneId
 const val CLOUD_BODY_LIMIT_BYTES = 8 * 1024 * 1024
 
 object CloudMessages {
-    const val OPEN_VIDEO_FIRST = "请先用播放器打开对应视频，同目录会生成该文件。"
+    const val OPEN_VIDEO_FIRST = "请先用播放器打开对应视频，配套文件夹里会生成该文件。"
     const val BAD_HASH_NAME = "哈希文件名不是「视频全名.videohash.json」。"
     const val NAME_MISMATCH = "字幕名和视频主文件名对不上。字幕名必须与主文件名相同，或只在后面加「_语言」。"
     const val BAD_HASH = "文件里的 hash 不是 64 位小写十六进制。"

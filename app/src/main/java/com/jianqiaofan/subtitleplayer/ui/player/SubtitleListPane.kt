@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,6 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -28,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,8 +61,11 @@ import com.jianqiaofan.subtitleplayer.domain.tags.shouldShowTagFilter
 import com.jianqiaofan.subtitleplayer.domain.tags.subtitleBodyDimmed
 import com.jianqiaofan.subtitleplayer.domain.tags.tagCounts
 import com.jianqiaofan.subtitleplayer.domain.tags.tagPalette
+import com.jianqiaofan.subtitleplayer.domain.screenshot.PlaybackRow
+import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotShot
+import com.jianqiaofan.subtitleplayer.domain.screenshot.mergeScreenshotRows
+import com.jianqiaofan.subtitleplayer.domain.screenshot.screenshotListLabel
 import com.jianqiaofan.subtitleplayer.domain.tags.TagAlignment
-import com.jianqiaofan.subtitleplayer.domain.tags.SubtitleListRow
 import com.jianqiaofan.subtitleplayer.ui.theme.AccentPurple
 import com.jianqiaofan.subtitleplayer.ui.theme.NoteGold
 import com.jianqiaofan.subtitleplayer.ui.theme.OnDarkMuted
@@ -77,6 +84,8 @@ fun SubtitleListPane(
     selectedIndices: Set<Int>,
     menuIndex: Int?,
     onMenuIndexChange: (Int?) -> Unit,
+    /** Fired for row menus that are not tracked by [menuIndex] (screenshot / unmatched). */
+    onContextMenuOpenChange: (Boolean) -> Unit = {},
     onDensityToggle: () -> Unit,
     onCueClick: (Int) -> Unit,
     onEnterSelection: (Int) -> Unit,
@@ -98,11 +107,23 @@ fun SubtitleListPane(
     panelBackground: Color = SurfacePanel,
     modifier: Modifier = Modifier,
     showHeader: Boolean = true,
+    listTitle: String = "字幕列表",
+    allowEdit: Boolean = true,
+    timelineSteps: List<Pair<Int, String>> = emptyList(),
+    selectedTimelineStep: Int = 0,
+    onTimelineStep: (Int) -> Unit = {},
+    emptyHint: String? = null,
+    screenshots: List<ScreenshotShot> = emptyList(),
+    onScreenshotClick: (String) -> Unit = {},
+    onScreenshotView: (String) -> Unit = {},
+    onScreenshotEdit: (String) -> Unit = {},
+    onScreenshotDelete: (String) -> Unit = {},
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val alignment = TagAlignment(attached, unmatched)
-    val rows = buildListRows(cues.size, alignment, tagFilter)
+    val rows = mergeScreenshotRows(buildListRows(cues.size, alignment, tagFilter), cues, screenshots)
+    val shotsById = screenshots.associateBy { it.id }
     val counts = tagCounts(alignment)
 
     Column(modifier = modifier.fillMaxSize().background(panelBackground)) {
@@ -115,7 +136,7 @@ fun SubtitleListPane(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = if (selectionMode) "已选 ${selectedIndices.size}" else "字幕列表",
+                    text = if (selectionMode) "已选 ${selectedIndices.size}" else listTitle,
                     style = MaterialTheme.typography.titleSmall,
                     color = Color.White,
                 )
@@ -147,8 +168,10 @@ fun SubtitleListPane(
                             TextButton(onClick = { onRepeat(only); onExitSelection() }) {
                                 Text("重复")
                             }
-                            TextButton(onClick = { onEdit(only); onExitSelection() }) {
-                                Text("编辑")
+                            if (allowEdit) {
+                                TextButton(onClick = { onEdit(only); onExitSelection() }) {
+                                    Text("编辑")
+                                }
                             }
                         }
                         TextButton(
@@ -164,6 +187,21 @@ fun SubtitleListPane(
                         TextButton(onClick = onDensityToggle) {
                             Text(density.label)
                         }
+                    }
+                }
+            }
+        }
+        if (timelineSteps.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                timelineSteps.forEach { (seconds, label) ->
+                    TextButton(onClick = { onTimelineStep(seconds) }) {
+                        Text(label, color = if (seconds == selectedTimelineStep) AccentPurple else Color.White)
                     }
                 }
             }
@@ -188,9 +226,9 @@ fun SubtitleListPane(
             )
         }
 
-        if (cues.isEmpty() && unmatched.isEmpty()) {
+        if (cues.isEmpty() && unmatched.isEmpty() && screenshots.isEmpty()) {
             Text(
-                text = if (tracksEmpty) "未找到字幕" else "字幕为空",
+                text = emptyHint ?: if (tracksEmpty) "未找到字幕" else "字幕为空",
                 color = OnDarkMuted,
                 modifier = Modifier.padding(16.dp),
             )
@@ -210,12 +248,24 @@ fun SubtitleListPane(
             ) {
                 items(rows, key = { row ->
                     when (row) {
-                        is SubtitleListRow.Cue -> "cue-${row.cueIndex}"
-                        is SubtitleListRow.Unmatched -> "tag-${row.entryId}"
+                        is PlaybackRow.Cue -> "cue-${row.cueIndex}"
+                        is PlaybackRow.Shot -> "shot-${row.id}"
+                        is PlaybackRow.Unmatched -> "tag-${row.entryId}"
                     }
                 }) { row ->
                     when (row) {
-                        is SubtitleListRow.Cue -> {
+                        is PlaybackRow.Shot -> {
+                            val shot = shotsById[row.id] ?: return@items
+                            ScreenshotRow(
+                                shot = shot,
+                                onClick = { onScreenshotClick(shot.id) },
+                                onView = { onScreenshotView(shot.id) },
+                                onEdit = { onScreenshotEdit(shot.id) },
+                                onDelete = { onScreenshotDelete(shot.id) },
+                                onMenuOpenChange = onContextMenuOpenChange,
+                            )
+                        }
+                        is PlaybackRow.Cue -> {
                             val index = row.cueIndex
                             val cue = cues[index]
                             val entry = attached[index]
@@ -241,25 +291,116 @@ fun SubtitleListPane(
                                     clipboard.setText(AnnotatedString(cue.text))
                                     onMenuIndexChange(null)
                                 },
+                                allowEdit = allowEdit,
                                 onEdit = { onMenuIndexChange(null); onEdit(index) },
                                 onMultiSelect = { onMenuIndexChange(null); onEnterSelection(index) },
                                 onTag = { onMenuIndexChange(null); onTag(listOf(index)) },
                                 onClearTags = { onMenuIndexChange(null); onClearTags(listOf(index)) },
+                                onMenuOpenChange = onContextMenuOpenChange,
                             )
                         }
-                        is SubtitleListRow.Unmatched -> {
+                        is PlaybackRow.Unmatched -> {
                             val entry = unmatched.firstOrNull { it.id == row.entryId } ?: return@items
                             UnmatchedRow(
                                 entry = entry,
                                 onClick = { onUnmatchedClick(entry) },
                                 onAttach = { onAttachUnmatched(entry.id) },
                                 onDelete = { onDeleteUnmatched(entry.id) },
+                                onMenuOpenChange = onContextMenuOpenChange,
                             )
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ScreenshotRow(
+    shot: ScreenshotShot,
+    onClick: () -> Unit,
+    onView: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onMenuOpenChange: (Boolean) -> Unit = {},
+) {
+    var menu by remember { mutableStateOf(false) }
+    var confirmStep by remember { mutableStateOf(0) }
+    DisposableEffect(menu) {
+        if (!menu) return@DisposableEffect onDispose { }
+        onMenuOpenChange(true)
+        onDispose { onMenuOpenChange(false) }
+    }
+    val rowBg = Color(0xFF3A2458)
+    val rowFg = Color(0xFFE2C6FF)
+    Box {
+        Text(
+            text = screenshotListLabel(shot),
+            color = rowFg,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(rowBg)
+                .combinedClickable(onClick = onClick, onLongClick = { menu = true })
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        )
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text("查看截图") },
+                onClick = {
+                    menu = false
+                    onView()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("编辑截图") },
+                onClick = {
+                    menu = false
+                    onEdit()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("删除截图") },
+                onClick = {
+                    menu = false
+                    confirmStep = 1
+                },
+            )
+        }
+    }
+    if (confirmStep == 1) {
+        AlertDialog(
+            onDismissRequest = { confirmStep = 0 },
+            title = { Text("删除截图") },
+            text = {
+                Text("删除这张截图和它的笔记？云端的这张截图也会一并删除，今后无法再从线上同步回来。")
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmStep = 2 }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmStep = 0 }) { Text("取消") }
+            },
+        )
+    }
+    if (confirmStep == 2) {
+        AlertDialog(
+            onDismissRequest = { confirmStep = 0 },
+            title = { Text("确定删除？") },
+            text = {
+                Text("确定删除？本机和云端的这张截图都会去掉，以后不能再线上同步。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStep = 0
+                    onDelete()
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmStep = 0 }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -279,10 +420,12 @@ private fun CueRow(
     onNoteClick: () -> Unit,
     onRepeat: () -> Unit,
     onCopy: () -> Unit,
+    allowEdit: Boolean,
     onEdit: () -> Unit,
     onMultiSelect: () -> Unit,
     onTag: () -> Unit,
     onClearTags: () -> Unit,
+    onMenuOpenChange: (Boolean) -> Unit = {},
 ) {
     val compact = density == SubtitleListDensity.Compact
     val tags = entry?.tags.orEmpty()
@@ -294,6 +437,11 @@ private fun CueRow(
         else -> Color.Unspecified
     }
     val verticalPad = if (compact) 2.dp else 10.dp
+    DisposableEffect(menuExpanded) {
+        if (!menuExpanded) return@DisposableEffect onDispose { }
+        onMenuOpenChange(true)
+        onDispose { onMenuOpenChange(false) }
+    }
     Box {
         Row(
             modifier = Modifier
@@ -345,7 +493,7 @@ private fun CueRow(
                         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             TagChips(tags)
                             Text(
-                                text = formatCueListBody(cue),
+                                text = formatCueListBody(cue).ifBlank { formatCueListHeader(cue) },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = bodyColor,
                                 modifier = Modifier.weight(1f),
@@ -370,7 +518,9 @@ private fun CueRow(
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { onMenuIndexChange(null) }) {
             DropdownMenuItem(text = { Text("重复播放") }, onClick = onRepeat)
             DropdownMenuItem(text = { Text("复制") }, onClick = onCopy)
-            DropdownMenuItem(text = { Text("编辑") }, onClick = onEdit)
+            if (allowEdit) {
+                DropdownMenuItem(text = { Text("编辑") }, onClick = onEdit)
+            }
             DropdownMenuItem(text = { Text("标签") }, onClick = onTag)
             DropdownMenuItem(text = { Text("清除标签") }, onClick = onClearTags)
             DropdownMenuItem(text = { Text("多选") }, onClick = onMultiSelect)
@@ -401,8 +551,14 @@ private fun UnmatchedRow(
     onClick: () -> Unit,
     onAttach: () -> Unit,
     onDelete: () -> Unit,
+    onMenuOpenChange: (Boolean) -> Unit = {},
 ) {
     var menu by remember { mutableStateOf(false) }
+    DisposableEffect(menu) {
+        if (!menu) return@DisposableEffect onDispose { }
+        onMenuOpenChange(true)
+        onDispose { onMenuOpenChange(false) }
+    }
     Box {
         Column(
             modifier = Modifier

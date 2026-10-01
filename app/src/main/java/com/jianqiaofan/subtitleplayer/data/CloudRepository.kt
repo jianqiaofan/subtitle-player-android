@@ -24,7 +24,12 @@ import com.jianqiaofan.subtitleplayer.domain.cloud.subtitleSuffix
 import com.jianqiaofan.subtitleplayer.domain.cloud.validatePassword
 import com.jianqiaofan.subtitleplayer.domain.cloud.validateUsername
 import com.jianqiaofan.subtitleplayer.domain.cloud.normalizeServer
+import com.jianqiaofan.subtitleplayer.domain.bundle.isBundleFolderName
 import com.jianqiaofan.subtitleplayer.domain.cloud.VIDEO_HASH_SUFFIX
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.PLAYBACK_UPLOAD_LIMIT
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.PlaybackSession
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.parsePlaybackSnapshot
+import com.jianqiaofan.subtitleplayer.domain.timeline.TIMELINE_SUFFIX
 import com.jianqiaofan.subtitleplayer.domain.model.isSubtitleFile
 import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
 import com.jianqiaofan.subtitleplayer.domain.model.subtitleFormatOf
@@ -54,9 +59,11 @@ data class UploadPreparation(
 data class CloudOpenResult(
     val subtitlesChanged: Boolean = false,
     val tagsChanged: Boolean = false,
+    val videoHash: String? = null,
 )
 
 class CloudRepository(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs = AppPreferences(context)
     private val baselines = CloudBaselineStore(context)
     private val folders = CloudFolderFiles(context)
@@ -240,12 +247,12 @@ class CloudRepository(context: Context) {
             folders.ensureVideoHash(treeUri, directoryUri, mediaUri, mediaName)
         } ?: return CloudOpenResult()
         val account = prefs.cloudAccountOnce()
-        if (account.username.isBlank()) return CloudOpenResult()
+        if (account.username.isBlank() || !DeviceNetwork.isOnline(appContext)) return CloudOpenResult(videoHash = hash)
         val stem = mediaStem(mediaName)
         val snapshot = try {
             authorized { cloud, token -> cloud.sync(token, hash) }
         } catch (_: CloudException) {
-            return CloudOpenResult()
+            return CloudOpenResult(videoHash = hash)
         }
         val local = withContext(Dispatchers.IO) { localSubtitles(treeUri, directoryUri, stem) }
         val offers = subtitleDownloadOffers(stem, snapshot.subtitles, local.map { LocalSubtitleContent(it.fileName, it.content) })
@@ -258,11 +265,24 @@ class CloudRepository(context: Context) {
         }
         var downloaded = false
         var subtitlesChanged = false
-        if (offers.isNotEmpty()) {
-            val answer = ask(CloudPrompt.Subtitles(offers.map { CloudOfferLine(it.fileName, cloudTimeLabel(it.updatedAt)) }))
+        val bodyOffers = offers.filter { it.suffix != TIMELINE_SUFFIX }
+        val hasLocalSubtitle = local.any { it.valid }
+        if (bodyOffers.isNotEmpty() && !hasLocalSubtitle) {
+            withContext(Dispatchers.IO) {
+                for (offer in bodyOffers) {
+                    val written = folders.writeText(directoryUri, offer.fileName, folders.mimeFor(offer.fileName), offer.content)
+                    if (written.isSuccess) {
+                        baselines.saveSubtitle(account.username, hash, offer.suffix, offer.contentHash, offer.updatedAt)
+                        downloaded = true
+                        subtitlesChanged = true
+                    }
+                }
+            }
+        } else if (bodyOffers.isNotEmpty()) {
+            val answer = ask(CloudPrompt.Subtitles(bodyOffers.map { CloudOfferLine(it.fileName, cloudTimeLabel(it.updatedAt)) }))
             if (answer is CloudAnswer.Accept) {
                 withContext(Dispatchers.IO) {
-                    for (offer in offers) {
+                    for (offer in bodyOffers) {
                         val written = folders.writeText(directoryUri, offer.fileName, folders.mimeFor(offer.fileName), offer.content)
                         if (written.isSuccess) {
                             baselines.saveSubtitle(account.username, hash, offer.suffix, offer.contentHash, offer.updatedAt)
@@ -320,6 +340,7 @@ class CloudRepository(context: Context) {
                     withContext(Dispatchers.IO) {
                         for (item in detailed.flatMap { it.subtitles }) {
                             val content = item.content ?: continue
+                            if (item.suffix == TIMELINE_SUFFIX) continue
                             val fileName = localSubtitleFileName(stem, item.suffix)
                             val written = folders.writeText(directoryUri, fileName, folders.mimeFor(fileName), content)
                             if (written.isSuccess) subtitlesChanged = true
@@ -328,7 +349,110 @@ class CloudRepository(context: Context) {
                 }
             }
         }
-        return CloudOpenResult(subtitlesChanged, tagsChanged)
+        return CloudOpenResult(subtitlesChanged, tagsChanged, hash)
+    }
+
+    suspend fun syncPlayback(
+        videoHash: String,
+        videoStem: String,
+        sessions: List<PlaybackSession>,
+    ): List<PlaybackSession>? {
+        if (videoHash.isBlank() || !DeviceNetwork.isOnline(appContext)) return null
+        if (prefs.cloudAccountOnce().username.isBlank()) return null
+        return try {
+            var latest = emptyList<PlaybackSession>()
+            authorized { cloud, token ->
+                if (sessions.isEmpty()) {
+                    latest = parsePlaybackSnapshot(cloud.getPlayback(token, videoHash)).orEmpty()
+                } else {
+                    sessions.chunked(PLAYBACK_UPLOAD_LIMIT).forEach { chunk ->
+                        latest = parsePlaybackSnapshot(cloud.putPlayback(token, videoHash, videoStem, chunk)).orEmpty()
+                    }
+                }
+            }
+            latest
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun uploadEdits(
+        videoHash: String,
+        videoStem: String,
+        treeUri: Uri,
+        directoryUri: Uri,
+        subtitleNames: List<String>,
+        tagSubtitleNames: List<String>,
+    ): String = withContext(Dispatchers.IO) {
+        if (!DeviceNetwork.isOnline(appContext)) return@withContext ""
+        val username = prefs.cloudAccountOnce().username
+        if (username.isBlank()) return@withContext ""
+        val lines = mutableListOf<String>()
+        val localFiles = localSubtitles(treeUri, directoryUri, videoStem)
+        val subtitlePayloads = subtitleNames.mapNotNull { name ->
+            if (name.endsWith(TIMELINE_SUFFIX)) return@mapNotNull null
+            val suffix = subtitleSuffix(videoStem, name)
+            if (suffix == null) {
+                lines += "未上传 $name（${CloudMessages.NAME_MISMATCH}）"
+                return@mapNotNull null
+            }
+            val content = localFiles.find { it.fileName == name }?.content
+            if (content.isNullOrBlank()) {
+                lines += "未上传 $name（无法读取文件）"
+                return@mapNotNull null
+            }
+            Triple(name, suffix, content)
+        }
+        val tagPayloads = tagSubtitleNames.mapNotNull { subtitleName ->
+            val suffix = subtitleSuffix(videoStem, subtitleName) ?: return@mapNotNull null
+            val document = tags.readInFolder(treeUri, directoryUri, subtitleName) ?: return@mapNotNull null
+            val baseline = baselines.tag(username, videoHash, suffix)
+            val plan = planTagUpload(document, baseline?.document, utcTimestamp())
+            if (plan.localChanged) {
+                tags.saveInFolder(
+                    treeUri,
+                    directoryUri,
+                    subtitleName,
+                    TagDocument(TAG_DOCUMENT_VERSION, subtitleName, plan.localEntries),
+                )
+            }
+            val upload = plan.upload ?: return@mapNotNull null
+            Triple(subtitleName, suffix, upload)
+        }
+        if (subtitlePayloads.isEmpty() && tagPayloads.isEmpty()) return@withContext lines.joinToString("\n")
+        try {
+            authorized { cloud, token ->
+                val shared = if (subtitlePayloads.isEmpty()) {
+                    emptyMap()
+                } else {
+                    cloud.listSubtitles(token).filter { it.videoHash == videoHash }.associate { it.suffix to it.shared }
+                }
+                for ((name, suffix, content) in subtitlePayloads) {
+                    val saved = cloud.putSubtitle(token, videoHash, videoStem, name, content, shared[suffix] == true)
+                    baselines.saveSubtitle(
+                        username,
+                        videoHash,
+                        saved.suffix.ifBlank { suffix },
+                        saved.contentHash.ifBlank { sha256Hex(content) },
+                        saved.updatedAt,
+                    )
+                }
+                for ((subtitleName, suffix, upload) in tagPayloads) {
+                    val saved = cloud.putTags(token, videoHash, videoStem, subtitleName, upload)
+                    baselines.saveTag(
+                        username,
+                        videoHash,
+                        saved.suffix.ifBlank { suffix },
+                        saved.contentHash,
+                        saved.updatedAt,
+                        saved.document,
+                    )
+                }
+            }
+        } catch (e: CloudException) {
+            lines += e.message ?: "上传失败"
+        }
+        lines.joinToString("\n")
     }
 
     private suspend fun considerSubtitle(
@@ -379,7 +503,11 @@ class CloudRepository(context: Context) {
 
     private fun hashFilesOf(uri: Uri): List<NamedText> {
         val parent = folders.parentOf(uri) ?: return emptyList()
-        return folders.listHashFiles(parent.treeUri, parent.directoryUri)
+        val direct = folders.listHashFiles(parent.treeUri, parent.directoryUri)
+        val nested = library.listFolder(parent.treeUri, parent.directoryId)
+            .filter { it.isDirectory && isBundleFolderName(it.displayName) }
+            .flatMap { folders.listHashFiles(parent.treeUri, it.documentUri) }
+        return direct + nested
     }
 
     private fun localSubtitles(treeUri: Uri, directoryUri: Uri, stem: String): List<LocalCueFile> {
@@ -418,6 +546,16 @@ class CloudRepository(context: Context) {
         name.error?.let { throw CloudException(400, it) }
         validatePassword(password)?.let { throw CloudException(400, it) }
         return name.username
+    }
+
+    suspend fun <T> online(block: (CloudApi, String, String) -> T): T? {
+        val account = prefs.cloudAccountOnce()
+        if (account.username.isBlank() || !DeviceNetwork.isOnline(appContext)) return null
+        return try {
+            authorized { api, token -> block(api, token, account.username) }
+        } catch (e: CloudException) {
+            if (e.status == 0) null else throw e
+        }
     }
 
     private suspend fun <T> authorized(block: (CloudApi, String) -> T): T = withContext(Dispatchers.IO) {

@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.res.Configuration
 import android.view.LayoutInflater
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenRotation
@@ -210,11 +212,47 @@ fun PlayerScreen(
     var noteCue by remember { mutableStateOf<Int?>(null) }
     var reportText by remember { mutableStateOf<String?>(null) }
     var menuIndex by remember { mutableStateOf<Int?>(null) }
+    /** True while any row long-press menu is open (cue / screenshot / unmatched). */
+    var listContextMenuOpen by remember { mutableStateOf(false) }
+    var editSession by remember { mutableStateOf<ScreenshotEditSession?>(null) }
+    var showScreenshotManage by remember { mutableStateOf(false) }
+    var viewerSession by remember { mutableStateOf<ScreenshotViewerSession?>(null) }
+    var viewerEditItem by remember { mutableStateOf<ViewerItem?>(null) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIndices by remember { mutableStateOf(setOf<Int>()) }
     val snackbar = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    fun openCurrentVideoViewer(shotId: String? = null) {
+        val ordered = com.jianqiaofan.subtitleplayer.domain.screenshot.sortedScreenshots(state.screenshots)
+        if (ordered.isEmpty()) {
+            viewModel.showTransientMessage("这部视频还没有截图")
+            return
+        }
+        val index = when {
+            shotId != null -> ordered.indexOfFirst { it.id == shotId }.takeIf { it >= 0 }
+                ?: com.jianqiaofan.subtitleplayer.domain.screenshot.nearestScreenshotIndex(
+                    ordered,
+                    state.positionMs / 1000.0,
+                )
+            else -> com.jianqiaofan.subtitleplayer.domain.screenshot.nearestScreenshotIndex(
+                ordered,
+                state.positionMs / 1000.0,
+            )
+        }.coerceAtLeast(0)
+        viewerSession = ScreenshotViewerSession(
+            items = ordered.map { ViewerItem(it) },
+            index = index,
+            returnToManage = false,
+        )
+    }
+
+    fun closeViewer() {
+        val returnManage = viewerSession?.returnToManage == true
+        viewerSession = null
+        if (returnManage) showScreenshotManage = true
+    }
 
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
@@ -266,23 +304,28 @@ fun PlayerScreen(
         delay(SubtitleFollowResumeMs)
         followPaused = false
     }
-    val listRows = com.jianqiaofan.subtitleplayer.domain.tags.buildListRows(
-        state.cues.size,
-        com.jianqiaofan.subtitleplayer.domain.tags.TagAlignment(state.attachedTags, state.unmatchedTags),
-        state.tagFilter,
+    val listRows = com.jianqiaofan.subtitleplayer.domain.screenshot.mergeScreenshotRows(
+        com.jianqiaofan.subtitleplayer.domain.tags.buildListRows(
+            state.cues.size,
+            com.jianqiaofan.subtitleplayer.domain.tags.TagAlignment(state.attachedTags, state.unmatchedTags),
+            state.tagFilter,
+        ),
+        state.cues,
+        state.screenshots,
     )
     val followRow = listRows.indexOfFirst { row ->
-        row is com.jianqiaofan.subtitleplayer.domain.tags.SubtitleListRow.Cue && row.cueIndex == state.currentCueIndex
+        row is com.jianqiaofan.subtitleplayer.domain.screenshot.PlaybackRow.Cue && row.cueIndex == state.currentCueIndex
     }
+    val cueMenuOpen = menuIndex != null
     val followSuspended = subtitleFollowSuspended(
         playing = state.playing,
-        menuOpen = menuIndex != null,
+        menuOpen = cueMenuOpen || listContextMenuOpen,
         selecting = selectionMode,
     )
     LaunchedEffect(followRow, followPaused, followSuspended) {
-        if (!followPaused && !followSuspended && followRow >= 0) {
-            listState.centerItem(followRow)
-        }
+        // Skip auto-follow while a long-press action menu is open so menu taps don't miss.
+        if (followPaused || followSuspended || followRow < 0) return@LaunchedEffect
+        listState.centerItem(followRow) { followPaused || followSuspended }
     }
 
     val captionSpan = com.jianqiaofan.subtitleplayer.domain.display.onScreenHorizontalSpan(
@@ -307,6 +350,7 @@ fun PlayerScreen(
             selectedIndices = selectedIndices,
             menuIndex = menuIndex,
             onMenuIndexChange = { menuIndex = it },
+            onContextMenuOpenChange = { listContextMenuOpen = it },
             onDensityToggle = {
                 viewModel.updateDisplaySettings {
                     it.copy(subtitleListDensity = it.subtitleListDensity.toggled())
@@ -342,12 +386,38 @@ fun PlayerScreen(
             onNoteClick = { noteCue = it },
             onTag = { tagEditIndices = it },
             onClearTags = viewModel::clearCueTags,
+            listTitle = if (state.timelineMode) "时间线" else "字幕列表",
+            allowEdit = !state.timelineMode,
+            timelineSteps = if (state.timelineMode) {
+                com.jianqiaofan.subtitleplayer.domain.timeline.TIMELINE_STEP_SECONDS.map { step ->
+                    step to com.jianqiaofan.subtitleplayer.domain.timeline.timelineStepLabel(step)
+                }
+            } else {
+                emptyList()
+            },
+            selectedTimelineStep = state.timelineStepSec,
+            onTimelineStep = viewModel::setTimelineStep,
+            emptyHint = if (state.timelineMode && state.cues.isEmpty()) "正在读取视频时长…" else null,
             onUnmatchedClick = { entry ->
                 viewModel.seekTo((entry.start * 1000.0).toLong(), fromUser = true)
                 if (!state.playing) viewModel.togglePlayPause()
             },
             onAttachUnmatched = viewModel::attachUnmatched,
             onDeleteUnmatched = viewModel::deleteUnmatched,
+            screenshots = state.screenshots,
+            onScreenshotClick = { id ->
+                userScrollGeneration.intValue = 0
+                followPaused = false
+                viewModel.seekToScreenshot(id)
+            },
+            onScreenshotView = { id ->
+                openCurrentVideoViewer(id)
+            },
+            onScreenshotEdit = { id ->
+                viewModel.prepareEditScreenshot(id)
+                editSession = ScreenshotEditSession.Editing(id)
+            },
+            onScreenshotDelete = viewModel::deleteScreenshot,
             panelBackground = panelBg,
             showHeader = showHeader,
         )
@@ -368,6 +438,15 @@ fun PlayerScreen(
         return
     }
 
+    BackHandler {
+        val viewer = viewerSession
+        if (viewer != null) {
+            closeViewer()
+        } else {
+            viewModel.requestLeave(onBack)
+        }
+    }
+
     val playerTopBar: @Composable (Color, Boolean) -> Unit = { barColor, overlay ->
         TopAppBar(
             windowInsets = if (overlay) WindowInsets(0.dp) else TopAppBarDefaults.windowInsets,
@@ -380,8 +459,7 @@ fun PlayerScreen(
             },
             navigationIcon = {
                 IconButton(onClick = {
-                    viewModel.pauseForNavigation()
-                    onBack()
+                    if (viewerSession != null) closeViewer() else viewModel.requestLeave(onBack)
                 }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
@@ -390,13 +468,40 @@ fun PlayerScreen(
                 com.jianqiaofan.subtitleplayer.ui.OpenFileMenuButton(
                     recents = state.recentMedia,
                     onOpenPicker = onBrowseMedia,
-                    onOpenRecent = { item -> onOpenMedia(item.uri, item.displayName) },
+                    onOpenRecent = { item ->
+                        viewModel.requestLeave { onOpenMedia(item.uri, item.displayName) }
+                    },
                 )
+                if (!state.playing) {
+                    IconButton(onClick = {
+                        val draft = viewModel.startCaptureScreenshot(
+                            onReady = {
+                                val current = editSession
+                                if (current is ScreenshotEditSession.Creating) {
+                                    editSession = current.copy(capturing = false)
+                                }
+                            },
+                            onFailed = { message ->
+                                editSession = null
+                                viewModel.showTransientMessage(message)
+                            },
+                        )
+                        if (draft != null) {
+                            editSession = ScreenshotEditSession.Creating(draft = draft, capturing = true)
+                        }
+                    }) {
+                        Icon(Icons.Filled.PhotoCamera, contentDescription = "截图")
+                    }
+                }
                 Box {
                     IconButton(onClick = { toolsMenu = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "更多")
                     }
                     DropdownMenu(expanded = toolsMenu, onDismissRequest = { toolsMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("学习记录") },
+                            onClick = { toolsMenu = false; viewModel.showStudyLog() },
+                        )
                         DropdownMenuItem(
                             text = { Text("同步标签文件") },
                             onClick = { toolsMenu = false; explainSync = true },
@@ -424,14 +529,26 @@ fun PlayerScreen(
                         contentDescription = if (devicePortrait) "切换横屏" else "切换竖屏",
                     )
                 }
+                TextButton(onClick = { showScreenshotManage = true }) { Text("截图管理") }
+                TextButton(
+                    onClick = { openCurrentVideoViewer() },
+                    enabled = state.screenshots.isNotEmpty(),
+                ) { Text("截图预览") }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Filled.Subtitles, contentDescription = "画面字幕")
                 }
                 TextButton(onClick = { subtitleMenu = true }) {
-                    Text(state.selectedTrack?.displayName ?: "未找到字幕")
+                    Text(
+                        when {
+                            state.timelineMode -> "时间线"
+                            else -> state.selectedTrack?.displayName ?: "未找到字幕"
+                        },
+                    )
                 }
                 DropdownMenu(expanded = subtitleMenu, onDismissRequest = { subtitleMenu = false }) {
-                    if (state.tracks.isEmpty()) {
+                    if (state.timelineMode) {
+                        DropdownMenuItem(text = { Text("时间线") }, onClick = { subtitleMenu = false })
+                    } else if (state.tracks.isEmpty()) {
                         DropdownMenuItem(text = { Text("未找到字幕") }, onClick = { subtitleMenu = false })
                     } else {
                         state.tracks.forEach { track ->
@@ -610,6 +727,121 @@ fun PlayerScreen(
         }
     }
 
+    val session = editSession
+    val editingShot = (session as? ScreenshotEditSession.Editing)?.let { editing ->
+        state.screenshots.find { it.id == editing.shotId }
+    }
+    LaunchedEffect(session, editingShot) {
+        if (session is ScreenshotEditSession.Editing && editingShot == null) {
+            editSession = null
+        }
+    }
+    when (session) {
+        is ScreenshotEditSession.Creating -> {
+            ScreenshotEditDialog(
+                shot = session.draft,
+                cues = state.cues,
+                customTagNames = state.customTagNames,
+                capturing = session.capturing,
+                onSave = { updated ->
+                    viewModel.saveScreenshot(updated)
+                    editSession = null
+                },
+                onCancel = {
+                    viewModel.cancelCaptureScreenshot(session.draft.id)
+                    editSession = null
+                },
+            )
+        }
+        is ScreenshotEditSession.Editing -> {
+            editingShot?.let { shot ->
+                ScreenshotEditDialog(
+                    shot = shot,
+                    cues = state.cues,
+                    customTagNames = state.customTagNames,
+                    capturing = false,
+                    onSave = { updated ->
+                        viewModel.saveScreenshot(updated)
+                        editSession = null
+                    },
+                    onCancel = { editSession = null },
+                )
+            }
+        }
+        null -> Unit
+    }
+
+    val viewerEdit = viewerEditItem
+    if (viewerEdit != null) {
+        ScreenshotEditDialog(
+            shot = viewerEdit.shot,
+            cues = viewModel.cuesForViewerItem(viewerEdit),
+            customTagNames = state.customTagNames,
+            capturing = false,
+            onSave = { updated ->
+                viewModel.saveViewerShot(viewerEdit, updated)
+                viewerSession = viewerSession?.let { session ->
+                    session.copy(
+                        items = session.items.map { item ->
+                            if (item.shot.id == updated.id) {
+                                item.copy(
+                                    shot = updated,
+                                    managed = item.managed?.copy(shot = updated),
+                                )
+                            } else {
+                                item
+                            }
+                        },
+                    )
+                }
+                viewerEditItem = null
+            },
+            onCancel = { viewerEditItem = null },
+        )
+    }
+
+    val viewer = viewerSession
+    if (viewer != null && viewer.items.isNotEmpty()) {
+        ScreenshotViewerOverlay(
+            items = viewer.items,
+            initialIndex = viewer.index,
+            loadImage = { item -> viewModel.viewerImageBytes(item) },
+            onSaveShot = { item, updated ->
+                viewModel.saveViewerShot(item, updated)
+                viewerSession = viewerSession?.let { session ->
+                    session.copy(
+                        items = session.items.map { entry ->
+                            if (entry.shot.id == updated.id) {
+                                entry.copy(
+                                    shot = updated,
+                                    managed = entry.managed?.copy(shot = updated),
+                                )
+                            } else {
+                                entry
+                            }
+                        },
+                    )
+                }
+            },
+            onEditShot = { item -> viewerEditItem = item },
+            onClose = { closeViewer() },
+        )
+    }
+
+    if (showScreenshotManage && viewerSession == null) {
+        ScreenshotManageDialog(
+            onDismiss = { showScreenshotManage = false },
+            onView = { managedItems, index ->
+                showScreenshotManage = false
+                viewerSession = ScreenshotViewerSession(
+                    items = managedItems.map { ViewerItem(shot = it.shot, managed = it) },
+                    index = index,
+                    returnToManage = true,
+                )
+            },
+        )
+    }
+
     if (showCountdown) {
         CountdownDialog(
             onDismiss = { showCountdown = false },
@@ -712,7 +944,22 @@ fun PlayerScreen(
             onAccept = viewModel::acceptCloudPrompt,
             onDismiss = viewModel::dismissCloudPrompt,
             onPickPerson = viewModel::acceptCloudShare,
+            onKeepCopy = viewModel::chooseSubtitleCopy,
         )
+    }
+    state.leavePrompt?.let { prompt ->
+        LeaveSyncDialog(
+            prompt = prompt,
+            onSync = { subtitles, tags, remember ->
+                viewModel.confirmLeaveSync(true, subtitles, tags, remember)
+            },
+            onSkip = { subtitles, tags, remember ->
+                viewModel.confirmLeaveSync(false, subtitles, tags, remember)
+            },
+        )
+    }
+    state.studyLog?.let { log ->
+        StudyLogDialog(log, onDismiss = viewModel::dismissStudyLog)
     }
 }
 
@@ -1152,6 +1399,21 @@ fun SplitPaneLayout(
     }
 }
 
+private sealed class ScreenshotEditSession {
+    data class Creating(
+        val draft: com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotShot,
+        val capturing: Boolean,
+    ) : ScreenshotEditSession()
+
+    data class Editing(val shotId: String) : ScreenshotEditSession()
+}
+
+private data class ScreenshotViewerSession(
+    val items: List<ViewerItem>,
+    val index: Int,
+    val returnToManage: Boolean,
+)
+
 @Composable
 private fun SplitHandle(orientation: Orientation, modifier: Modifier) {
     Box(modifier = modifier.background(WindowBackground.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
@@ -1184,9 +1446,10 @@ internal fun subtitleCenterScrollDelta(
     return itemCenter - viewportCenter
 }
 
-private suspend fun LazyListState.centerItem(index: Int) {
-    if (index < 0) return
+private suspend fun LazyListState.centerItem(index: Int, aborted: () -> Boolean = { false }) {
+    if (index < 0 || aborted()) return
     scrollToItem(index)
+    if (aborted()) return
     val layout = layoutInfo
     val item = layout.visibleItemsInfo.firstOrNull { it.index == index } ?: return
     val delta = subtitleCenterScrollDelta(
@@ -1195,7 +1458,7 @@ private suspend fun LazyListState.centerItem(index: Int) {
         layout.viewportStartOffset,
         layout.viewportEndOffset,
     )
-    if (delta != 0) {
+    if (delta != 0 && !aborted()) {
         scrollBy(delta.toFloat())
     }
 }

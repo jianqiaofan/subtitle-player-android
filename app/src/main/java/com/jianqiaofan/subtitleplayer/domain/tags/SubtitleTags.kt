@@ -22,7 +22,8 @@ private const val START_TOLERANCE_MS = 1L
 private const val UNIQUE_TEXT_GAP_SEC = 1.0
 
 val TAG_CATEGORIES = listOf(
-    "通用" to listOf("重点", "难点", "易错", "新章节", "新页面", "重要断点", "已掌握", "待复习", "存疑"),
+    // 「还没想好」must stay last in 通用.
+    "通用" to listOf("重点", "难点", "易错", "新章节", "新页面", "重要断点", "已掌握", "待复习", "存疑", "还没想好"),
     "备考" to listOf("真题", "得分点", "技巧", "必背", "口诀", "案例"),
     "语言学习" to listOf("单词", "语法", "发音", "短语", "地道表达"),
     "电影" to listOf("佳句", "反复练听", "跟读", "长难句", "俚语", "文化背景", "名场面"),
@@ -72,6 +73,7 @@ fun tagPalette(name: String): TagPalette = when (name) {
     "已掌握" -> TagPalette(0xFF1E3D32, 0xFF9DDEB8)
     "待复习" -> TagPalette(0xFF5A3A1E, 0xFFFFCC88)
     "存疑" -> TagPalette(0xFF5A2048, 0xFFFFB0D0)
+    "还没想好" -> TagPalette(0xFF3A3A42, 0xFFD0D0D8)
     "真题" -> TagPalette(0xFF5C2840, 0xFFFFB3C7)
     "得分点" -> TagPalette(0xFF6B3A28, 0xFFFFC2A8)
     "技巧" -> TagPalette(0xFF4A3820, 0xFFF0D0A0)

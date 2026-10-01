@@ -91,6 +91,12 @@ class SubtitleTagsTest {
         assertEquals(0xFF5A2048.toInt(), tagPalette("存疑").background.toInt())
         assertEquals(0xFFFFB0D0.toInt(), tagPalette("存疑").foreground.toInt())
         assertEquals(0xFF3A3A3A.toInt(), tagPalette("自定义").background.toInt())
+        val general = TAG_CATEGORIES.first { it.first == "通用" }.second
+        assertEquals("还没想好", general.last())
+        assertEquals("存疑", general[general.lastIndex - 1])
+        assertEquals(0xFF3A3A42.toInt(), tagPalette("还没想好").background.toInt())
+        assertEquals(0xFFD0D0D8.toInt(), tagPalette("还没想好").foreground.toInt())
+        assertTrue("还没想好" in PRESET_TAGS)
     }
 
     @Test

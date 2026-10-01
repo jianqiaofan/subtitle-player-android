@@ -16,9 +16,19 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
 import com.jianqiaofan.subtitleplayer.data.CloudRepository
+import com.jianqiaofan.subtitleplayer.data.DeviceNetwork
+import com.jianqiaofan.subtitleplayer.data.MediaBundleFiles
 import com.jianqiaofan.subtitleplayer.data.MediaLibrary
+import com.jianqiaofan.subtitleplayer.data.ScreenshotRepository
+import com.jianqiaofan.subtitleplayer.data.renderAnnotatedJpeg
 import com.jianqiaofan.subtitleplayer.domain.cloud.CloudAnswer
 import com.jianqiaofan.subtitleplayer.domain.cloud.CloudPrompt
+import com.jianqiaofan.subtitleplayer.domain.cloud.LeaveAction
+import com.jianqiaofan.subtitleplayer.domain.cloud.LeavePolicy
+import com.jianqiaofan.subtitleplayer.domain.cloud.PendingChanges
+import com.jianqiaofan.subtitleplayer.domain.cloud.StudySyncMemory
+import com.jianqiaofan.subtitleplayer.domain.cloud.itemsToUpload
+import com.jianqiaofan.subtitleplayer.domain.cloud.leaveAction
 import com.jianqiaofan.subtitleplayer.data.SubtitleDocuments
 import com.jianqiaofan.subtitleplayer.data.TagDocuments
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
@@ -26,7 +36,24 @@ import com.jianqiaofan.subtitleplayer.domain.model.RecentMedia
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleTrack
 import com.jianqiaofan.subtitleplayer.domain.model.isAudioFile
+import com.jianqiaofan.subtitleplayer.domain.bundle.isBundleFolderName
+import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
+import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotNote
+import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotShot
+import com.jianqiaofan.subtitleplayer.domain.screenshot.frameIndexAt
+import com.jianqiaofan.subtitleplayer.domain.screenshot.newScreenshotId
+import com.jianqiaofan.subtitleplayer.domain.screenshot.suggestedScreenshotTitle
 import com.jianqiaofan.subtitleplayer.domain.model.subtitleFormatOf
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.PlaybackLog
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.beginSession
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.closeSession
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.formatSessionLine
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.formatStudyDuration
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.mergePlaybackSessions
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.newPlaybackSessionId
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.sessionsForAccount
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.sessionsToUpload
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.studyTotalMillis
 import com.jianqiaofan.subtitleplayer.domain.subtitle.autoSelectTrack
 import com.jianqiaofan.subtitleplayer.domain.subtitle.effectiveRepeatEnd
 import com.jianqiaofan.subtitleplayer.domain.subtitle.findCueIndexAtTime
@@ -48,7 +75,19 @@ import com.jianqiaofan.subtitleplayer.domain.tags.companionSubtitleNames
 import com.jianqiaofan.subtitleplayer.domain.tags.deleteUnmatched
 import com.jianqiaofan.subtitleplayer.domain.tags.describeSyncResults
 import com.jianqiaofan.subtitleplayer.domain.tags.releaseFilterIfNoTags
+import com.jianqiaofan.subtitleplayer.domain.tags.subtitleFileNameFromTagFile
 import com.jianqiaofan.subtitleplayer.domain.tags.updateNote
+import com.jianqiaofan.subtitleplayer.domain.timeline.TIMELINE_STEP_SECONDS
+import com.jianqiaofan.subtitleplayer.domain.timeline.alignTimelineTags
+import com.jianqiaofan.subtitleplayer.domain.timeline.buildTimeline
+import com.jianqiaofan.subtitleplayer.domain.timeline.defaultTimelineStepSeconds
+import com.jianqiaofan.subtitleplayer.domain.timeline.isTimelineSubtitleFile
+import com.jianqiaofan.subtitleplayer.domain.timeline.rehomeTimelineTags
+import com.jianqiaofan.subtitleplayer.domain.timeline.timelineEntriesForSave
+import com.jianqiaofan.subtitleplayer.domain.timeline.timelineSubtitleFileName
+import com.jianqiaofan.subtitleplayer.domain.time.utcTimestamp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -60,9 +99,18 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class RepeatRange(val startMs: Long, val endMs: Long)
+
+private data class LeaveChoice(
+    val sync: Boolean,
+    val subtitles: Boolean,
+    val tags: Boolean,
+    val remember: Boolean,
+)
 
 data class PlayerUiState(
     val mediaName: String,
@@ -93,6 +141,11 @@ data class PlayerUiState(
     val message: String? = null,
     val playError: String? = null,
     val cloudPrompt: CloudPrompt? = null,
+    val timelineMode: Boolean = false,
+    val timelineStepSec: Int = 60,
+    val studyLog: StudyLogUi? = null,
+    val leavePrompt: LeaveSyncUi? = null,
+    val screenshots: List<ScreenshotShot> = emptyList(),
 )
 
 class PlayerViewModel(
@@ -104,6 +157,9 @@ class PlayerViewModel(
     private val library = MediaLibrary(application)
     private val subtitles = SubtitleDocuments(application)
     private val tagDocuments = TagDocuments(application)
+    private val bundles = MediaBundleFiles(application)
+    private val cloud = CloudRepository(application)
+    private val screenshotsRepo = ScreenshotRepository(application)
     private var countdownJob: Job? = null
     private var repeatJob: Job? = null
     private var repeatRange: RepeatRange? = null
@@ -112,7 +168,19 @@ class PlayerViewModel(
     private var snapshotCues: List<SubtitleCue> = emptyList()
     private var contentTreeUri: Uri? = null
     private var contentDirectoryUri: Uri? = null
-    private var cloudAnswer: kotlinx.coroutines.CompletableDeferred<CloudAnswer>? = null
+    private var cloudAnswer: CompletableDeferred<CloudAnswer>? = null
+    private var resolvedMediaName: String = mediaName
+    private var videoHash: String? = null
+    private var openSessionId: String? = null
+    private var suppressSessionBoundary = false
+    private val dirtySubtitles = mutableSetOf<String>()
+    private val dirtyTags = mutableSetOf<String>()
+    private var timelineHiddenEntries: List<TagEntry> = emptyList()
+    private var timelineStepChosen = false
+    private val studyMutex = Mutex()
+    private var leaveGate: CompletableDeferred<Unit>? = null
+    private var leaveAnswer: CompletableDeferred<LeaveChoice>? = null
+    private var leaveSettled = false
 
     val player: ExoPlayer = ExoPlayer.Builder(application)
         .setRenderersFactory(DefaultRenderersFactory(application).setEnableDecoderFallback(true))
@@ -128,12 +196,22 @@ class PlayerViewModel(
         addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _state.update { it.copy(playing = isPlaying) }
+                if (suppressSessionBoundary) return
+                viewModelScope.launch {
+                    if (isPlaying) startStudySession() else finishStudySession()
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) {
                     val d = this@apply.duration
                     _state.update { it.copy(durationMs = d.coerceAtLeast(0L), playError = null) }
+                    if (_state.value.timelineMode) {
+                        viewModelScope.launch { publishTimeline(d) }
+                    }
+                }
+                if (playbackState == Player.STATE_ENDED) {
+                    viewModelScope.launch { performLeaveSync() }
                 }
             }
 
@@ -184,6 +262,9 @@ class PlayerViewModel(
                 _state.update {
                     it.copy(positionMs = pos, durationMs = dur, currentCueIndex = idx)
                 }
+                if (_state.value.timelineMode && _state.value.cues.isEmpty() && dur > 0L) {
+                    publishTimeline(dur)
+                }
                 delay(80)
             }
         }
@@ -232,7 +313,7 @@ class PlayerViewModel(
         val next = applyTagEdit(previous, _state.value.cues, edit)
         publishAlignment(next)
         viewModelScope.launch {
-            if (!persistAlignment(next)) publishAlignment(previous)
+            if (!persistAlignment(next, fromUser = true)) publishAlignment(previous)
             else refreshCustomTags()
         }
     }
@@ -243,7 +324,7 @@ class PlayerViewModel(
         val next = clearTags(previous, cueIndices)
         publishAlignment(next)
         viewModelScope.launch {
-            if (!persistAlignment(next)) publishAlignment(previous)
+            if (!persistAlignment(next, fromUser = true)) publishAlignment(previous)
         }
     }
 
@@ -253,7 +334,7 @@ class PlayerViewModel(
         val next = updateNote(previous, cueIndex, note)
         publishAlignment(next)
         viewModelScope.launch {
-            if (!persistAlignment(next)) publishAlignment(previous)
+            if (!persistAlignment(next, fromUser = true)) publishAlignment(previous)
         }
     }
 
@@ -269,7 +350,7 @@ class PlayerViewModel(
         val next = attachUnmatchedToCue(previous, entryId, cueIndex, cue)
         publishAlignment(next)
         viewModelScope.launch {
-            if (!persistAlignment(next)) publishAlignment(previous)
+            if (!persistAlignment(next, fromUser = true)) publishAlignment(previous)
         }
     }
 
@@ -279,7 +360,7 @@ class PlayerViewModel(
         val next = deleteUnmatched(previous, entryId)
         publishAlignment(next)
         viewModelScope.launch {
-            if (!persistAlignment(next)) publishAlignment(previous)
+            if (!persistAlignment(next, fromUser = true)) publishAlignment(previous)
         }
     }
 
@@ -348,6 +429,214 @@ class PlayerViewModel(
         startPlayback()
     }
 
+    fun seekToScreenshot(id: String) {
+        val shot = _state.value.screenshots.find { it.id == id } ?: return
+        cancelRepeat()
+        player.seekTo((shot.time * 1000.0).toLong().coerceAtLeast(0L))
+        startPlayback()
+    }
+
+    /** Pause and jump to the shot time before opening the create/edit dialog. */
+    fun prepareEditScreenshot(id: String) {
+        val shot = _state.value.screenshots.find { it.id == id } ?: return
+        cancelRepeat()
+        if (player.isPlaying) player.pause()
+        player.seekTo((shot.time * 1000.0).toLong().coerceAtLeast(0L))
+    }
+
+    private var captureJob: Job? = null
+
+    /**
+     * Builds a draft immediately so the edit dialog can open, then grabs the frame
+     * and writes files in the background. [onReady] / [onFailed] run on the main thread.
+     */
+    fun startCaptureScreenshot(
+        onReady: () -> Unit = {},
+        onFailed: (String) -> Unit = {},
+    ): ScreenshotShot? {
+        if (_state.value.isAudio) {
+            showTransientMessage("音频没有画面，不能截图")
+            return null
+        }
+        if (!_state.value.writable) {
+            showTransientMessage("无法保存截图。请用可写的文件夹打开这部视频。")
+            return null
+        }
+        val timeMs = player.currentPosition.coerceAtLeast(0L)
+        val frameRate = player.videoFormat?.frameRate
+        val timeSec = timeMs / 1000.0
+        val cueIndex = findCueIndexAtTime(_state.value.cues, timeSec)
+        val cueTags = if (cueIndex >= 0) {
+            _state.value.attachedTags[cueIndex]?.tags.orEmpty()
+        } else {
+            emptyList()
+        }
+        val title = suggestedScreenshotTitle(mediaStem(resolvedMediaName), cueTags)
+        val id = newScreenshotId()
+        val now = System.currentTimeMillis()
+        val draft = ScreenshotShot(
+            id = id,
+            title = title,
+            time = timeSec,
+            frame = frameIndexAt(timeSec, frameRate),
+            image = "",
+            createdAt = now,
+            updatedAt = now,
+            notes = emptyList(),
+        )
+        captureJob?.cancel()
+        captureJob = viewModelScope.launch {
+            val bundle = screenshotBundle()
+            if (bundle == null) {
+                onFailed("无法保存截图。请用可写的文件夹打开这部视频。")
+                return@launch
+            }
+            val (createdId, error) = try {
+                screenshotsRepo.capture(
+                    bundle.first,
+                    bundle.second,
+                    Uri.parse(mediaUriString),
+                    timeMs,
+                    frameRate,
+                    title = title,
+                    shotId = id,
+                )
+            } catch (_: CancellationException) {
+                // Cancel path also runs discardCapture; nothing else to do here.
+                return@launch
+            }
+            if (!isActive) return@launch
+            // null/null means this id was discarded while capture raced past cancel.
+            if (createdId == null && error == null) return@launch
+            if (!error.isNullOrBlank()) {
+                onFailed(error)
+                return@launch
+            }
+            refreshScreenshots()
+            if (!isActive) return@launch
+            onReady()
+            syncScreenshots()
+        }
+        return draft
+    }
+
+    fun cancelCaptureScreenshot(id: String) {
+        captureJob?.cancel()
+        captureJob = null
+        viewModelScope.launch {
+            val bundle = screenshotBundle() ?: return@launch
+            val error = screenshotsRepo.discardCapture(
+                bundle.first,
+                bundle.second,
+                id,
+                Uri.parse(mediaUriString),
+                resolvedMediaName,
+                mediaUriString,
+                videoHash,
+            )
+            refreshScreenshots()
+            if (!error.isNullOrBlank()) showTransientMessage(error)
+            else {
+                // Drop a not-yet-synced create; if it reached the cloud mid-flight, sync removes it.
+                syncScreenshots()
+            }
+        }
+    }
+
+    fun saveScreenshot(shot: ScreenshotShot) {
+        viewModelScope.launch {
+            val bundle = screenshotBundle() ?: return@launch
+            val error = screenshotsRepo.save(bundle.first, bundle.second, shot)
+            refreshScreenshots()
+            if (!error.isNullOrBlank()) showTransientMessage(error) else syncScreenshots()
+        }
+    }
+
+    fun deleteScreenshot(id: String) {
+        viewModelScope.launch {
+            val bundle = screenshotBundle() ?: return@launch
+            val error = screenshotsRepo.delete(
+                bundle.first,
+                bundle.second,
+                id,
+                Uri.parse(mediaUriString),
+                resolvedMediaName,
+                mediaUriString,
+                videoHash,
+            )
+            refreshScreenshots()
+            if (!error.isNullOrBlank()) showTransientMessage(error) else syncScreenshots()
+        }
+    }
+
+    suspend fun shotImage(id: String): ByteArray? {
+        val bundle = screenshotBundle() ?: return null
+        return screenshotsRepo.imageBytes(bundle.first, bundle.second, id)
+    }
+
+    suspend fun plainScreenshotJpeg(id: String, notes: List<ScreenshotNote>, showNotes: Boolean): ByteArray? {
+        val bytes = shotImage(id) ?: return null
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        return try {
+            renderAnnotatedJpeg(bitmap, notes, showNotes)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    fun plainScreenshotName(title: String): String =
+        com.jianqiaofan.subtitleplayer.domain.screenshot.screenshotExportFileName(title)
+
+    suspend fun screenshotExportUri(): String? = prefs.screenshotExportUriOnce()
+
+    fun rememberScreenshotExport(uri: String) {
+        viewModelScope.launch { prefs.rememberScreenshotExportUri(uri) }
+    }
+
+    suspend fun viewerImageBytes(item: ViewerItem): ByteArray? {
+        val managed = item.managed
+        return if (managed != null) {
+            screenshotsRepo.imageBytes(managed.treeUri, managed.bundleUri, item.shot.id)
+        } else {
+            shotImage(item.shot.id)
+        }
+    }
+
+    fun saveViewerShot(item: ViewerItem, shot: ScreenshotShot) {
+        viewModelScope.launch {
+            val managed = item.managed
+            if (managed != null) {
+                val error = screenshotsRepo.save(managed.treeUri, managed.bundleUri, shot)
+                if (!error.isNullOrBlank()) {
+                    showTransientMessage(error)
+                    return@launch
+                }
+                screenshotsRepo.sync(
+                    managed.treeUri,
+                    managed.bundleUri,
+                    managed.mediaUri,
+                    managed.mediaName,
+                    managed.mediaUri.toString(),
+                    null,
+                )
+                if (library.sameDocument(managed.mediaUri, Uri.parse(mediaUriString))) {
+                    refreshScreenshots()
+                }
+            } else {
+                saveScreenshot(shot)
+            }
+        }
+    }
+
+    fun cuesForViewerItem(item: ViewerItem): List<com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue> {
+        val managed = item.managed ?: return _state.value.cues
+        return if (library.sameDocument(managed.mediaUri, Uri.parse(mediaUriString))) {
+            _state.value.cues
+        } else {
+            emptyList()
+        }
+    }
+
     fun startRepeat(index: Int) {
         val cue = _state.value.cues.getOrNull(index) ?: return
         val durationSec = (_state.value.durationMs.takeIf { it > 0 } ?: player.duration.coerceAtLeast(0L)) / 1000.0
@@ -363,11 +652,16 @@ class PlayerViewModel(
             while (isActive && repeatRange != null) {
                 val range = repeatRange ?: break
                 if (player.currentPosition >= range.endMs) {
+                    suppressSessionBoundary = true
                     player.pause()
                     delay(500)
-                    if (repeatRange != range) break
+                    if (repeatRange != range) {
+                        suppressSessionBoundary = false
+                        break
+                    }
                     player.seekTo(range.startMs)
                     startPlayback()
+                    suppressSessionBoundary = false
                 }
                 delay(40)
             }
@@ -449,7 +743,64 @@ class PlayerViewModel(
         _state.update { it.copy(message = text) }
     }
 
+    fun chooseSubtitleCopy(keepBundle: Boolean) {
+        cloudAnswer?.complete(CloudAnswer.Keep(keepBundle))
+    }
+
+    fun requestLeave(then: () -> Unit) {
+        viewModelScope.launch {
+            suppressSessionBoundary = true
+            if (player.isPlaying) player.pause()
+            suppressSessionBoundary = false
+            finishStudySession()
+            performLeaveSync()
+            then()
+        }
+    }
+
+    fun setTimelineStep(seconds: Int) {
+        if (!_state.value.timelineMode || seconds !in TIMELINE_STEP_SECONDS) return
+        timelineStepChosen = true
+        viewModelScope.launch { rebuildTimeline(seconds) }
+    }
+
+    fun showStudyLog() {
+        viewModelScope.launch {
+            val directory = contentDirectoryUri
+            if (directory == null) {
+                _state.update { it.copy(message = "请先打开视频") }
+                return@launch
+            }
+            val username = prefs.cloudAccountOnce().username
+            val owners = prefs.studyMemory().sessionOwners
+            val log = withContext(Dispatchers.IO) { bundles.readPlayback(directory) }
+            val visible = sessionsForAccount(log.sessions, owners, username)
+                .filter { it.endedAt != null }
+                .sortedByDescending { it.startedAt }
+            _state.update {
+                it.copy(
+                    studyLog = StudyLogUi(
+                        total = formatStudyDuration(studyTotalMillis(visible)),
+                        lines = visible.mapNotNull { session -> formatSessionLine(session) },
+                    ),
+                )
+            }
+        }
+    }
+
+    fun dismissStudyLog() {
+        _state.update { it.copy(studyLog = null) }
+    }
+
+    fun confirmLeaveSync(sync: Boolean, subtitles: Boolean, tags: Boolean, remember: Boolean) {
+        leaveAnswer?.complete(LeaveChoice(sync, subtitles, tags, remember))
+    }
+
     fun saveCue(index: Int, start: Double, end: Double, text: String) {
+        if (_state.value.timelineMode) {
+            _state.update { it.copy(message = "时间线只在列表里使用，不会写成字幕文件") }
+            return
+        }
         val current = _state.value.cues.toMutableList()
         val existing = current.getOrNull(index) ?: return
         val updated = existing.copy(start = start, end = end, text = text)
@@ -486,12 +837,31 @@ class PlayerViewModel(
                 _state.update { it.copy(cues = snapshotCues) }
                 publishAlignment(previousAlignment)
             } else {
+                dirtySubtitles += track.fileName
+                dirtyTags += track.fileName
                 _state.update { it.copy(message = "已保存") }
             }
         }
     }
 
     override fun onCleared() {
+        val directory = contentDirectoryUri
+        val id = openSessionId
+        if (directory != null && id != null) {
+            openSessionId = null
+            val log = bundles.readPlayback(directory)
+            bundles.writePlayback(directory, closeSession(log, id, System.currentTimeMillis()))
+        }
+        if (dirtySubtitles.isNotEmpty() || dirtyTags.isNotEmpty()) {
+            kotlinx.coroutines.runBlocking {
+                val memory = prefs.studyMemory()
+                savePending(
+                    storedPending(memory).merge(
+                        PendingChanges(dirtySubtitles.isNotEmpty(), dirtyTags.isNotEmpty()),
+                    ),
+                )
+            }
+        }
         player.release()
         super.onCleared()
     }
@@ -547,7 +917,6 @@ class PlayerViewModel(
             return
         }
         contentTreeUri = folderTree
-        contentDirectoryUri = directory
         val folderLabel = located?.directoryName
             ?: library.folderDisplayName(folderTree)
         prefs.rememberMedia(mediaUriString, mediaName, folderLabel)
@@ -555,51 +924,56 @@ class PlayerViewModel(
         val resolvedName = withContext(Dispatchers.IO) {
             library.displayNameOf(mediaUri) ?: mediaName
         }
+        resolvedMediaName = resolvedName
+        val subtitleDir = bundles.prepare(folderTree, directory, resolvedName) { prompt ->
+            awaitCloudPrompt(prompt)
+        }
+        contentDirectoryUri = subtitleDir
         val tracks = findSubtitlesForMedia(
             resolvedName,
-            library.listSubtitleFilesIn(folderTree, directory),
+            library.listSubtitleFilesIn(folderTree, subtitleDir),
         )
         _state.update {
             it.copy(folderTreeUri = folderTree.toString(), tracks = tracks, writable = writable)
         }
+        var loadedReal = false
         val preferred = autoSelectTrack(tracks)
         if (preferred?.displayName == "同步") {
             loadTrack(preferred)
+            loadedReal = _state.value.cues.isNotEmpty()
         } else {
-            var loaded = false
             for (track in tracks) {
                 val format = subtitleFormatOf(track.fileName) ?: continue
                 val cues = subtitles.readCues(Uri.parse(track.documentUri), format)
                 if (cues.isNotEmpty()) {
-                    _state.update { it.copy(selectedTrack = track, cues = cues) }
+                    _state.update { it.copy(selectedTrack = track, cues = cues, timelineMode = false) }
                     loadTags(track, cues, resetFilter = true)
-                    loaded = true
+                    rehomeTimelineOnto(track, cues)
+                    loadedReal = true
                     break
                 }
             }
-            if (!loaded) {
-                _state.update {
-                    it.copy(
-                        selectedTrack = preferred,
-                        cues = emptyList(),
-                        message = if (tracks.isEmpty()) "未找到字幕" else null,
-                    )
-                }
-            }
         }
+        if (!loadedReal) enterTimeline()
         if (writable) cloudCheck(resolvedName)
+        refreshScreenshots()
+        viewModelScope.launch {
+            withContext(NonCancellable) { syncScreenshots() }
+        }
+        performLeaveSync()
     }
 
     private suspend fun cloudCheck(resolvedName: String) {
         val tree = contentTreeUri ?: return
         val directory = contentDirectoryUri ?: return
         try {
-            val result = CloudRepository(getApplication()).openSync(
+            val result = cloud.openSync(
                 mediaUri = Uri.parse(mediaUriString),
                 mediaName = resolvedName,
                 treeUri = tree,
                 directoryUri = directory,
             ) { prompt -> awaitCloudPrompt(prompt) }
+            if (!result.videoHash.isNullOrBlank()) videoHash = result.videoHash
             if (result.subtitlesChanged || result.tagsChanged) reloadSubtitles(resolvedName)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -627,8 +1001,14 @@ class PlayerViewModel(
             library.listSubtitleFilesIn(tree, directory),
         )
         val previous = _state.value.selectedTrack?.fileName
-        _state.update { it.copy(tracks = tracks) }
-        val next = tracks.find { it.fileName == previous } ?: autoSelectTrack(tracks) ?: return
+        if (tracks.isEmpty()) {
+            enterTimeline()
+            return
+        }
+        _state.update { it.copy(tracks = tracks, timelineMode = false) }
+        val next = tracks.find { it.fileName == previous && !isTimelineSubtitleFile(resolvedMediaName, it.fileName) }
+            ?: autoSelectTrack(tracks)
+            ?: return
         loadTrack(next)
     }
 
@@ -650,8 +1030,9 @@ class PlayerViewModel(
             }
             return
         }
-        _state.update { it.copy(selectedTrack = track, cues = cues, message = null) }
+        _state.update { it.copy(selectedTrack = track, cues = cues, message = null, timelineMode = false) }
         loadTags(track, cues, resetFilter = true)
+        rehomeTimelineOnto(track, cues)
     }
 
     private suspend fun loadTags(track: SubtitleTrack, cues: List<SubtitleCue>, resetFilter: Boolean) {
@@ -706,12 +1087,27 @@ class PlayerViewModel(
         }
     }
 
-    private suspend fun persistAlignment(alignment: TagAlignment): Boolean {
+    private suspend fun persistAlignment(alignment: TagAlignment, fromUser: Boolean = false): Boolean {
         val track = _state.value.selectedTrack ?: return false
         val tree = contentTreeUri ?: return false
         val directory = contentDirectoryUri ?: return false
-        val document = com.jianqiaofan.subtitleplayer.domain.tags.alignmentToDocument(track.fileName, alignment)
+        val base = com.jianqiaofan.subtitleplayer.domain.tags.alignmentToDocument(track.fileName, alignment)
+        val entries = if (_state.value.timelineMode) {
+            timelineEntriesForSave(base?.entries.orEmpty(), timelineHiddenEntries)
+        } else {
+            base?.entries.orEmpty()
+        }
+        val document = if (entries.isEmpty()) {
+            null
+        } else {
+            com.jianqiaofan.subtitleplayer.domain.tags.TagDocument(
+                com.jianqiaofan.subtitleplayer.domain.tags.TAG_DOCUMENT_VERSION,
+                track.fileName,
+                entries,
+            )
+        }
         val result = tagDocuments.saveInFolder(tree, directory, track.fileName, document)
+        if (result.isSuccess && fromUser) dirtyTags += track.fileName
         if (result.isFailure) {
             _state.update {
                 it.copy(message = "标签保存失败：${result.exceptionOrNull()?.message ?: "无法写入文件"}")
@@ -737,6 +1133,323 @@ class PlayerViewModel(
         repeatJob = null
         repeatRange = null
         _state.update { it.copy(repeating = false) }
+    }
+
+    private suspend fun enterTimeline() {
+        val fileName = timelineSubtitleFileName(mediaStem(resolvedMediaName))
+        timelineHiddenEntries = emptyList()
+        _state.update {
+            it.copy(
+                timelineMode = true,
+                tracks = emptyList(),
+                selectedTrack = SubtitleTrack("", fileName, "时间线"),
+                cues = emptyList(),
+                message = null,
+            )
+        }
+        publishTimeline(player.duration.takeIf { it > 0 } ?: _state.value.durationMs)
+    }
+
+    private suspend fun publishTimeline(durationMs: Long) {
+        if (!_state.value.timelineMode || durationMs <= 0L || _state.value.cues.isNotEmpty()) return
+        val step = if (timelineStepChosen) {
+            _state.value.timelineStepSec
+        } else {
+            defaultTimelineStepSeconds(durationMs / 1000.0)
+        }
+        rebuildTimeline(step)
+    }
+
+    private suspend fun rebuildTimeline(step: Int) {
+        val durationMs = player.duration.takeIf { it > 0 } ?: _state.value.durationMs
+        if (durationMs <= 0L) {
+            _state.update { it.copy(timelineStepSec = step) }
+            return
+        }
+        val cues = buildTimeline(durationMs / 1000.0, step)
+        val document = readTimelineDocument()
+        val (attached, hidden) = alignTimelineTags(cues, document?.entries.orEmpty())
+        timelineHiddenEntries = hidden
+        _state.update { it.copy(timelineStepSec = step, cues = cues, message = null) }
+        publishAlignment(com.jianqiaofan.subtitleplayer.domain.tags.TagAlignment(attached), com.jianqiaofan.subtitleplayer.domain.tags.TagListFilter())
+    }
+
+    private suspend fun readTimelineDocument(): com.jianqiaofan.subtitleplayer.domain.tags.TagDocument? {
+        val tree = contentTreeUri ?: return null
+        val directory = contentDirectoryUri ?: return null
+        return tagDocuments.readInFolder(tree, directory, timelineSubtitleFileName(mediaStem(resolvedMediaName)))
+    }
+
+    private suspend fun rehomeTimelineOnto(track: SubtitleTrack, cues: List<com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue>) {
+        if (isTimelineSubtitleFile(resolvedMediaName, track.fileName) || cues.isEmpty()) return
+        val tree = contentTreeUri ?: return
+        val directory = contentDirectoryUri ?: return
+        val timelineName = timelineSubtitleFileName(mediaStem(resolvedMediaName))
+        val timelineDoc = tagDocuments.readInFolder(tree, directory, timelineName) ?: return
+        val subtitleDoc = tagDocuments.readInFolder(tree, directory, track.fileName)
+        val result = rehomeTimelineTags(timelineDoc.entries, cues, subtitleDoc?.entries.orEmpty(), utcTimestamp())
+        if (result.movedIds.isEmpty()) return
+        val version = com.jianqiaofan.subtitleplayer.domain.tags.TAG_DOCUMENT_VERSION
+        val savedSubtitle = tagDocuments.saveInFolder(
+            tree,
+            directory,
+            track.fileName,
+            com.jianqiaofan.subtitleplayer.domain.tags.TagDocument(version, track.fileName, result.subtitleEntries),
+        )
+        tagDocuments.saveInFolder(
+            tree,
+            directory,
+            timelineName,
+            com.jianqiaofan.subtitleplayer.domain.tags.TagDocument(version, timelineName, result.timelineEntries),
+        )
+        if (savedSubtitle.isSuccess) {
+            dirtyTags += track.fileName
+            dirtyTags += timelineName
+            loadTags(track, cues, resetFilter = false)
+        }
+    }
+
+    private suspend fun startStudySession() {
+        val directory = contentDirectoryUri ?: return
+        val username = prefs.cloudAccountOnce().username
+        val id = newPlaybackSessionId()
+        val started = System.currentTimeMillis()
+        val opened = studyMutex.withLock {
+            if (openSessionId != null) return@withLock false
+            openSessionId = id
+            withContext(Dispatchers.IO) {
+                val log = bundles.readPlayback(directory)
+                bundles.writePlayback(directory, beginSession(log, id, started))
+            }
+            true
+        }
+        if (!opened) return
+        if (username.isNotBlank()) {
+            prefs.updateStudyMemory { it.copy(sessionOwners = it.sessionOwners + (id to username)) }
+        }
+        syncStudyLog()
+    }
+
+    private suspend fun finishStudySession() {
+        val directory = contentDirectoryUri ?: return
+        val id = studyMutex.withLock {
+            val current = openSessionId ?: return@withLock null
+            openSessionId = null
+            current
+        } ?: return
+        val ended = System.currentTimeMillis()
+        studyMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val log = bundles.readPlayback(directory)
+                bundles.writePlayback(directory, closeSession(log, id, ended))
+            }
+        }
+        syncStudyLog()
+    }
+
+    private suspend fun syncStudyLog() {
+        val hash = videoHash ?: return
+        val directory = contentDirectoryUri ?: return
+        val username = prefs.cloudAccountOnce().username
+        if (username.isBlank() || !DeviceNetwork.isOnline(getApplication())) return
+        val memory = prefs.studyMemory()
+        val upload = studyMutex.withLock {
+            val log = withContext(Dispatchers.IO) { bundles.readPlayback(directory) }
+            sessionsToUpload(log.sessions, memory.sessionOwners, username, openSessionId)
+        }
+        val remote = cloud.syncPlayback(hash, mediaStem(resolvedMediaName), upload) ?: return
+        studyMutex.withLock {
+            val log = withContext(Dispatchers.IO) { bundles.readPlayback(directory) }
+            withContext(Dispatchers.IO) {
+                bundles.writePlayback(directory, PlaybackLog(sessions = mergePlaybackSessions(log.sessions, remote)))
+            }
+        }
+        val owned = remote.map { it.id } + upload.map { it.id }
+        prefs.updateStudyMemory { current ->
+            current.copy(sessionOwners = current.sessionOwners + owned.associateWith { username })
+        }
+    }
+
+    private suspend fun performLeaveSync() {
+        val existing = leaveGate
+        if (existing != null) {
+            existing.await()
+            return
+        }
+        if (leaveSettled && dirtySubtitles.isEmpty() && dirtyTags.isEmpty()) return
+        val gate = CompletableDeferred<Unit>()
+        leaveGate = gate
+        try {
+            val username = prefs.cloudAccountOnce().username
+            val online = DeviceNetwork.isOnline(getApplication())
+            val memory = prefs.studyMemory()
+            val pending = storedPending(memory).merge(
+                PendingChanges(dirtySubtitles.isNotEmpty(), dirtyTags.isNotEmpty()),
+            )
+            val policy = policyFor(memory)
+            when (leaveAction(username.isNotBlank(), online, pending, policy)) {
+                LeaveAction.Skip -> {
+                    if (pending.any) savePending(pending) else leaveSettled = true
+                }
+                LeaveAction.Auto -> {
+                    val upload = itemsToUpload(policy!!, pending)
+                    val error = uploadPending(upload)
+                    if (error.isNotBlank()) {
+                        savePending(pending)
+                    } else {
+                        if (upload.subtitles || !policy.syncSubtitles) dirtySubtitles.clear()
+                        if (upload.tags || !policy.syncTags) dirtyTags.clear()
+                        savePending(PendingChanges())
+                        leaveSettled = true
+                    }
+                }
+                LeaveAction.Ask -> {
+                    val choice = askLeave(pending)
+                    var next = pending
+                    if (choice.sync) {
+                        val upload = PendingChanges(
+                            subtitles = choice.subtitles && pending.subtitles,
+                            tags = choice.tags && pending.tags,
+                        )
+                        val error = uploadPending(upload)
+                        if (error.isBlank()) {
+                            if (upload.subtitles) dirtySubtitles.clear()
+                            if (upload.tags) dirtyTags.clear()
+                            next = PendingChanges(
+                                subtitles = pending.subtitles && !upload.subtitles,
+                                tags = pending.tags && !upload.tags,
+                            )
+                        } else {
+                            _state.update { it.copy(message = error) }
+                        }
+                    }
+                    if (choice.remember) {
+                        savePolicy(LeavePolicy(choice.subtitles, choice.tags))
+                        if (!choice.subtitles) dirtySubtitles.clear()
+                        if (!choice.tags) dirtyTags.clear()
+                        next = PendingChanges(
+                            subtitles = next.subtitles && choice.subtitles,
+                            tags = next.tags && choice.tags,
+                        )
+                    }
+                    savePending(next)
+                    leaveSettled = true
+                }
+            }
+        } finally {
+            gate.complete(Unit)
+            if (leaveGate === gate) leaveGate = null
+        }
+    }
+
+    private suspend fun askLeave(pending: PendingChanges): LeaveChoice {
+        val deferred = CompletableDeferred<LeaveChoice>()
+        leaveAnswer = deferred
+        _state.update {
+            it.copy(leavePrompt = LeaveSyncUi(pending.subtitles, pending.tags))
+        }
+        return try {
+            deferred.await()
+        } finally {
+            if (leaveAnswer === deferred) leaveAnswer = null
+            _state.update { it.copy(leavePrompt = null) }
+        }
+    }
+
+    private suspend fun uploadPending(upload: PendingChanges): String {
+        if (!upload.any) return ""
+        val hash = videoHash ?: return "还没算好视频哈希，请稍后再同步。"
+        val tree = contentTreeUri ?: return ""
+        val directory = contentDirectoryUri ?: return ""
+        return cloud.uploadEdits(
+            videoHash = hash,
+            videoStem = mediaStem(resolvedMediaName),
+            treeUri = tree,
+            directoryUri = directory,
+            subtitleNames = if (upload.subtitles) subtitleNamesForUpload() else emptyList(),
+            tagSubtitleNames = if (upload.tags) tagNamesForUpload() else emptyList(),
+        )
+    }
+
+    private fun subtitleNamesForUpload(): List<String> {
+        if (dirtySubtitles.isNotEmpty()) return dirtySubtitles.toList()
+        val tree = contentTreeUri ?: return emptyList()
+        val directory = contentDirectoryUri ?: return emptyList()
+        return library.listSubtitleFilesIn(tree, directory).map { it.fileName }
+    }
+
+    private fun tagNamesForUpload(): List<String> {
+        if (dirtyTags.isNotEmpty()) return dirtyTags.toList()
+        val tree = contentTreeUri ?: return emptyList()
+        val directory = contentDirectoryUri ?: return emptyList()
+        val directoryId = try {
+            android.provider.DocumentsContract.getDocumentId(directory)
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        return library.listFolder(tree, directoryId).mapNotNull { child ->
+            subtitleFileNameFromTagFile(child.displayName)
+        }
+    }
+
+    private fun storedPending(memory: StudySyncMemory): PendingChanges =
+        syncKeys().fold(PendingChanges()) { acc, key ->
+            acc.merge(memory.pending[key] ?: PendingChanges())
+        }
+
+    private fun policyFor(memory: StudySyncMemory): LeavePolicy? =
+        syncKeys().firstNotNullOfOrNull { memory.policies[it] }
+
+    private fun syncKeys(): List<String> = listOfNotNull(videoHash?.takeIf { it.isNotBlank() }, mediaUriString).distinct()
+
+    private suspend fun savePending(pending: PendingChanges) {
+        val key = videoHash?.takeIf { it.isNotBlank() } ?: mediaUriString
+        prefs.updateStudyMemory { memory ->
+            val pendingMap = memory.pending.toMutableMap()
+            syncKeys().forEach { pendingMap.remove(it) }
+            if (pending.any) pendingMap[key] = pending
+            memory.copy(pending = pendingMap)
+        }
+    }
+
+    private suspend fun savePolicy(policy: LeavePolicy) {
+        val key = videoHash?.takeIf { it.isNotBlank() } ?: mediaUriString
+        prefs.updateStudyMemory { memory ->
+            memory.copy(policies = memory.policies + (key to policy))
+        }
+    }
+
+    private suspend fun screenshotBundle(): Pair<Uri, Uri>? {
+        val tree = contentTreeUri ?: return null
+        val directory = contentDirectoryUri ?: return null
+        val name = withContext(Dispatchers.IO) { library.displayNameOf(directory) } ?: return null
+        if (!isBundleFolderName(name)) return null
+        return tree to directory
+    }
+
+    private suspend fun refreshScreenshots() {
+        val bundle = screenshotBundle()
+        if (bundle == null) {
+            _state.update { it.copy(screenshots = emptyList()) }
+            return
+        }
+        val shots = screenshotsRepo.read(bundle.first, bundle.second)
+        _state.update { it.copy(screenshots = shots) }
+    }
+
+    private suspend fun syncScreenshots() {
+        val bundle = screenshotBundle() ?: return
+        if (!_state.value.writable) return
+        val message = screenshotsRepo.sync(
+            bundle.first,
+            bundle.second,
+            Uri.parse(mediaUriString),
+            resolvedMediaName,
+            mediaUriString,
+            videoHash,
+        )
+        refreshScreenshots()
+        if (!message.isNullOrBlank()) _state.update { it.copy(message = message) }
     }
 
     private fun formatCountdown(totalSec: Int): String {

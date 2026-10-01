@@ -6,12 +6,13 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
+import com.jianqiaofan.subtitleplayer.domain.bundle.bundleFolderName
+import com.jianqiaofan.subtitleplayer.domain.bundle.subtitleNamesForVideo
 import com.jianqiaofan.subtitleplayer.domain.model.MediaEntry
 import com.jianqiaofan.subtitleplayer.domain.model.isAudioFile
 import com.jianqiaofan.subtitleplayer.domain.model.isMediaFile
 import com.jianqiaofan.subtitleplayer.domain.model.isSubtitleFile
 import com.jianqiaofan.subtitleplayer.domain.subtitle.NamedSubtitleFile
-import com.jianqiaofan.subtitleplayer.domain.subtitle.findSubtitlesForMedia
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -68,20 +69,31 @@ class MediaLibrary(private val context: Context) {
     }
 
     suspend fun listMedia(treeUri: Uri): List<MediaEntry> = withContext(Dispatchers.IO) {
-        val children = listChildren(treeUri)
-        val subtitleFiles = children
-            .filter { isSubtitleFile(it.displayName) }
-            .map { NamedSubtitleFile(it.displayName, it.documentUri.toString()) }
-        children
+        val rootId = DocumentsContract.getTreeDocumentId(treeUri)
+        val children = listFolder(treeUri, rootId)
+        val files = children.filter { !it.isDirectory }
+        val fileNames = files.map { it.displayName }
+        files
             .filter { isMediaFile(it.displayName) }
             .sortedBy { it.displayName.lowercase() }
             .map { child ->
+                val bundle = children.find { it.isDirectory && it.displayName == bundleFolderName(child.displayName) }
+                val bundleNames = if (bundle == null) {
+                    emptyList()
+                } else {
+                    val bundleId = try {
+                        DocumentsContract.getDocumentId(bundle.documentUri)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (bundleId == null) emptyList() else listFolder(treeUri, bundleId).map { it.displayName }
+                }
                 MediaEntry(
                     documentUri = child.documentUri.toString(),
                     displayName = child.displayName,
                     isAudio = isAudioFile(child.displayName),
                     durationMs = readDurationMs(child.documentUri),
-                    subtitleCount = findSubtitlesForMedia(child.displayName, subtitleFiles).size,
+                    subtitleCount = subtitleNamesForVideo(child.displayName, fileNames, bundleNames).size,
                 )
             }
     }

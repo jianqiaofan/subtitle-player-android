@@ -20,6 +20,9 @@ import com.jianqiaofan.subtitleplayer.domain.cloud.parseSavedSubtitle
 import com.jianqiaofan.subtitleplayer.domain.cloud.parseSavedTag
 import com.jianqiaofan.subtitleplayer.domain.cloud.parseShares
 import com.jianqiaofan.subtitleplayer.domain.cloud.parseSyncSnapshot
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.PlaybackSession
+import com.jianqiaofan.subtitleplayer.domain.playbacklog.encodePlaybackUpload
+import com.jianqiaofan.subtitleplayer.domain.screenshot.MAX_WEBP_BYTES
 import com.jianqiaofan.subtitleplayer.domain.json.jsonString
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -111,6 +114,42 @@ class CloudApi(
         return parseSavedSubtitle(body) ?: throw CloudException(200, "上传字幕的响应无法识别")
     }
 
+    fun putScreenshots(token: String, payload: String): String =
+        exchange("PUT", "/api/screenshots", token, payload)
+
+    fun putScreenshotImage(token: String, videoHash: String, shotId: String, webp: ByteArray): String {
+        if (webp.size > MAX_WEBP_BYTES) throw CloudException(400, "截图需要是 2MB 以内的 WebP")
+        val bytes = exchangeRaw(
+            "PUT",
+            "/api/screenshots/${enc(videoHash)}/${enc(shotId)}/image",
+            token,
+            webp,
+            WEBP,
+            "application/json",
+        )
+        return bytes.toString(Charsets.UTF_8)
+    }
+
+    fun getScreenshotImage(token: String, videoHash: String, shotId: String): ByteArray =
+        exchangeRaw(
+            "GET",
+            "/api/screenshots/${enc(videoHash)}/${enc(shotId)}/image",
+            token,
+            null,
+            null,
+            "image/webp, */*",
+        )
+
+    fun putPlayback(
+        token: String,
+        videoHash: String,
+        videoStem: String,
+        sessions: List<PlaybackSession>,
+    ): String = exchange("PUT", "/api/playback", token, encodePlaybackUpload(videoHash, videoStem, sessions))
+
+    fun getPlayback(token: String, videoHash: String): String =
+        exchange("GET", "/api/playback?video_hash=${enc(videoHash)}", token, null)
+
     fun putTags(
         token: String,
         videoHash: String,
@@ -139,17 +178,33 @@ class CloudApi(
         }
     }
 
-    private fun exchange(method: String, path: String, token: String?, json: String?): String {
+    private fun exchange(method: String, path: String, token: String?, json: String?): String =
+        exchangeRaw(method, path, token, json?.toByteArray(Charsets.UTF_8), JSON, "application/json")
+            .toString(Charsets.UTF_8)
+
+    private fun exchangeRaw(
+        method: String,
+        path: String,
+        token: String?,
+        bytes: ByteArray?,
+        contentType: okhttp3.MediaType?,
+        accept: String,
+    ): ByteArray {
         val builder = Request.Builder()
             .url(baseUrl + path)
-            .header("Accept", "application/json")
+            .header("Accept", accept)
         if (!token.isNullOrBlank()) builder.header("Authorization", "Bearer $token")
-        val body = json?.toRequestBody(JSON)
-        builder.method(method, if (method == "GET" || method == "DELETE") null else body)
+        val body = if (bytes == null || method == "GET" || method == "DELETE") {
+            null
+        } else {
+            bytes.toRequestBody(contentType)
+        }
+        builder.method(method, body)
         try {
             client.newCall(builder.build()).execute().use { response ->
-                val text = response.body?.string().orEmpty()
-                if (response.isSuccessful) return text
+                val payload = response.body?.bytes() ?: ByteArray(0)
+                if (response.isSuccessful) return payload
+                val text = payload.toString(Charsets.UTF_8)
                 val detail = parseErrorDetail(text)
                 throw CloudException(response.code, if (detail == "请求失败") "请求失败（${response.code}）" else detail)
             }
@@ -167,6 +222,7 @@ class CloudApi(
 
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
+        private val WEBP = "image/webp".toMediaType()
 
         fun client(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)

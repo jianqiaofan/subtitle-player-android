@@ -111,7 +111,24 @@ fun LibraryScreen(
                         Text("选择文件夹", modifier = Modifier.padding(start = 6.dp))
                     }
                     TextButton(onClick = onOpenAccount) { Text("账号") }
-                    TextButton(onClick = onExit) { Text("退出") }
+                    var confirmExit by remember { mutableStateOf(false) }
+                    TextButton(onClick = { confirmExit = true }) { Text("退出") }
+                    if (confirmExit) {
+                        AlertDialog(
+                            onDismissRequest = { confirmExit = false },
+                            title = { Text("退出") },
+                            text = { Text("确定要退出当前字幕播放器应用程序吗？") },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    confirmExit = false
+                                    onExit()
+                                }) { Text("是") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { confirmExit = false }) { Text("否") }
+                            },
+                        )
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = SurfacePanel,

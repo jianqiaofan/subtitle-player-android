@@ -9,6 +9,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.jianqiaofan.subtitleplayer.domain.cloud.DEFAULT_CLOUD_SERVER
 import com.jianqiaofan.subtitleplayer.domain.cloud.StoredCloudAccount
+import com.jianqiaofan.subtitleplayer.domain.cloud.StudySyncMemory
+import com.jianqiaofan.subtitleplayer.domain.cloud.encodeStudySyncMemory
+import com.jianqiaofan.subtitleplayer.domain.cloud.parseStudySyncMemory
 import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSideLandscape
 import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSidePortrait
 import com.jianqiaofan.subtitleplayer.domain.display.OnScreenSubtitlePosition
@@ -206,6 +209,78 @@ class AppPreferences(private val context: Context) {
     suspend fun loadPosition(mediaUri: String): Long? =
         decodePlayback(context.dataStore.data.first()[KEY_POSITIONS].orEmpty())[mediaUri]?.positionMs
 
+    suspend fun studyMemory(): StudySyncMemory =
+        parseStudySyncMemory(context.dataStore.data.first()[KEY_STUDY_SYNC].orEmpty())
+
+    suspend fun saveStudyMemory(memory: StudySyncMemory) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_STUDY_SYNC] = encodeStudySyncMemory(memory)
+        }
+    }
+
+    suspend fun updateStudyMemory(transform: (StudySyncMemory) -> StudySyncMemory) {
+        context.dataStore.edit { prefs ->
+            val current = parseStudySyncMemory(prefs[KEY_STUDY_SYNC].orEmpty())
+            prefs[KEY_STUDY_SYNC] = encodeStudySyncMemory(transform(current))
+        }
+    }
+
+    suspend fun screenshotExportUriOnce(): String? =
+        context.dataStore.data.first()[KEY_SCREENSHOT_EXPORT]?.takeIf { it.isNotBlank() }
+
+    suspend fun rememberScreenshotExportUri(uri: String) {
+        if (uri.isBlank()) return
+        context.dataStore.edit { prefs -> prefs[KEY_SCREENSHOT_EXPORT] = uri }
+    }
+
+    suspend fun isTipDismissed(tipId: String): Boolean {
+        if (tipId.isBlank()) return false
+        val raw = context.dataStore.data.first()[KEY_DISMISSED_TIPS].orEmpty()
+        return tipId in decodeTipIds(raw)
+    }
+
+    suspend fun dismissTip(tipId: String) {
+        if (tipId.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val next = (decodeTipIds(prefs[KEY_DISMISSED_TIPS].orEmpty()) + tipId).distinct()
+            prefs[KEY_DISMISSED_TIPS] = encodeTipIds(next)
+        }
+    }
+
+    val screenshotManageRecents: Flow<List<RecentFolder>> =
+        context.dataStore.data.map { prefs -> decodeFolders(prefs[KEY_SCREENSHOT_MANAGE_RECENTS].orEmpty()) }
+
+    suspend fun screenshotManageRecentsOnce(): List<RecentFolder> = screenshotManageRecents.first()
+
+    suspend fun screenshotManageFolderOnce(): String? =
+        context.dataStore.data.first()[KEY_SCREENSHOT_MANAGE_FOLDER]?.takeIf { it.isNotBlank() }
+
+    suspend fun rememberScreenshotManageFolder(treeUri: String, displayName: String) {
+        if (treeUri.isBlank()) return
+        val now = System.currentTimeMillis()
+        context.dataStore.edit { prefs ->
+            prefs[KEY_SCREENSHOT_MANAGE_FOLDER] = treeUri
+            val stored = decodeFolders(prefs[KEY_SCREENSHOT_MANAGE_RECENTS].orEmpty())
+            val existing = stored.filterNot { it.treeUri == treeUri }
+            val next = listOf(RecentFolder(treeUri, displayName, now)) + existing
+            prefs[KEY_SCREENSHOT_MANAGE_RECENTS] = encodeFolders(next.take(MANAGE_RECENT_MAX))
+        }
+    }
+
+    suspend fun screenshotEditChromeOnce(): Pair<String, Float> {
+        val prefs = context.dataStore.data.first()
+        val kind = prefs[KEY_SCREENSHOT_EDIT_THEME].orEmpty()
+        val opacity = prefs[KEY_SCREENSHOT_EDIT_OPACITY] ?: 0.80f
+        return kind to opacity
+    }
+
+    suspend fun saveScreenshotEditChrome(themeWire: String, opacity: Float) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_SCREENSHOT_EDIT_THEME] = themeWire
+            prefs[KEY_SCREENSHOT_EDIT_OPACITY] = opacity
+        }
+    }
+
     suspend fun cloudAccountOnce(): StoredCloudAccount {
         val prefs = context.dataStore.data.first()
         return StoredCloudAccount(
@@ -230,7 +305,11 @@ class AppPreferences(private val context: Context) {
     companion object {
         const val MAX_RECENTS = 8
         const val MAX_RECENT_MEDIA = 15
+        private const val MANAGE_RECENT_MAX = 15
         private val KEY_RECENTS = stringPreferencesKey("recent_folders")
+        private val KEY_DISMISSED_TIPS = stringPreferencesKey("dismissed_tips")
+        private val KEY_SCREENSHOT_MANAGE_FOLDER = stringPreferencesKey("screenshot_manage_folder")
+        private val KEY_SCREENSHOT_MANAGE_RECENTS = stringPreferencesKey("screenshot_manage_recents")
         private val KEY_RECENT_MEDIA = stringPreferencesKey("recent_media")
         private val KEY_BATCH_TAG_FILES = stringPreferencesKey("batch_tag_sync_files")
         private val KEY_BATCH_TAG_DIR = stringPreferencesKey("batch_tag_sync_video_dir")
@@ -260,6 +339,10 @@ class AppPreferences(private val context: Context) {
         private val KEY_CLOUD_PASSWORD = stringPreferencesKey("cloud_password")
         private val KEY_CLOUD_TOKEN = stringPreferencesKey("cloud_token")
         private val KEY_CLOUD_TOKEN_USER = stringPreferencesKey("cloud_token_user")
+        private val KEY_STUDY_SYNC = stringPreferencesKey("study_sync")
+        private val KEY_SCREENSHOT_EXPORT = stringPreferencesKey("screenshot_export_uri")
+        private val KEY_SCREENSHOT_EDIT_THEME = stringPreferencesKey("screenshot_edit_theme")
+        private val KEY_SCREENSHOT_EDIT_OPACITY = floatPreferencesKey("screenshot_edit_opacity")
 
         private fun encodeFolders(folders: List<RecentFolder>): String =
             folders.joinToString("\n") {
@@ -289,5 +372,10 @@ class AppPreferences(private val context: Context) {
                     RecentMedia(parts[0], parts[1], parts.getOrElse(2) { "" })
                 }
                 .toList()
+
+        private fun encodeTipIds(ids: List<String>): String = ids.joinToString("\n")
+
+        private fun decodeTipIds(raw: String): List<String> =
+            raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
     }
 }

@@ -70,14 +70,26 @@ data class SavedTag(
 
 data class CloudOfferLine(val fileName: String, val timeLabel: String)
 
+data class FileCopyInfo(
+    val path: String,
+    val createdLabel: String,
+    val modifiedLabel: String,
+)
+
 sealed class CloudPrompt {
     data class Subtitles(val lines: List<CloudOfferLine>) : CloudPrompt()
     data class Tags(val lines: List<CloudOfferLine>) : CloudPrompt()
     data class Shares(val people: List<SharePerson>) : CloudPrompt()
+    data class SubtitleConflict(
+        val fileName: String,
+        val bundle: FileCopyInfo,
+        val beside: FileCopyInfo,
+    ) : CloudPrompt()
 }
 
 sealed class CloudAnswer {
     data object Accept : CloudAnswer()
     data object Dismiss : CloudAnswer()
     data class Person(val username: String) : CloudAnswer()
+    data class Keep(val keepBundle: Boolean) : CloudAnswer()
 }
