@@ -2,7 +2,6 @@ package com.jianqiaofan.subtitleplayer.domain.screenshot
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -29,7 +28,10 @@ class ScreenshotViewerTest {
         val notes = listOf(early, late)
         assertEquals("Note 1", noteNumberLabel(notes, early.id))
         assertEquals("Note 2", noteNumberLabel(notes, late.id))
-        assertNull(noteNumberLabel(listOf(early), early.id))
+        assertEquals("Note", noteNumberLabel(listOf(early), early.id))
+        assertEquals("Note", stylePanelNoteTitle(listOf(early), early.id))
+        assertEquals("Note 1", stylePanelNoteTitle(notes, early.id))
+        assertEquals("Note 2", stylePanelNoteTitle(notes, late.id))
         val reused = reuseNoteStyle(late, early, nowMs = 9)
         val box = requireNotNull(reused.box)
         assertEquals(0.5, box.x, 1e-6)
@@ -38,6 +40,12 @@ class ScreenshotViewerTest {
         assertEquals(0.08, box.font, 1e-6)
         assertEquals(NOTE_COLOR_RED, box.color)
         assertEquals(9L, reused.updatedAt)
+        val spring = NOTE_STYLE_PRESETS.first { it.id == "spring" }
+        val withTitle = applyNoteStylePreset(early.box!!, spring)
+        val reusedTitle = reuseNoteStyle(late, early.copy(box = withTitle), nowMs = 10).box!!
+        assertEquals(spring.titleBackground.lowercase(), reusedTitle.titleBackground.lowercase())
+        assertTrue(reusedTitle.titleBold)
+        assertTrue(reusedTitle.titleItalic)
     }
 
     @Test
@@ -58,6 +66,26 @@ class ScreenshotViewerTest {
         assertTrue(viewerControlsOnLight(0.7))
         assertFalse(viewerControlsOnLight(0.4))
         assertEquals(1.0, averageLuminance01(255, 255, 255), 1e-6)
+    }
+
+    @Test
+    fun screenshotContentSameIgnoresStamps() {
+        val base = shot("aaaaaaaaaaaa", time = 1.0).copy(
+            title = "t",
+            notes = listOf(note("111111111111", "hi", created = 1, box = NoteBox(0.1, 0.2, 0.3, 0.2))),
+        )
+        val stamped = base.copy(
+            updatedAt = 99,
+            notes = base.notes.map { it.copy(updatedAt = 88) },
+        )
+        assertTrue(screenshotContentSame(base, stamped))
+        assertFalse(screenshotContentSame(base, base.copy(title = "other")))
+        assertFalse(
+            screenshotContentSame(
+                base,
+                base.copy(notes = base.notes.map { it.copy(text = "changed") }),
+            ),
+        )
     }
 
     private fun shot(id: String, time: Double) = ScreenshotShot(

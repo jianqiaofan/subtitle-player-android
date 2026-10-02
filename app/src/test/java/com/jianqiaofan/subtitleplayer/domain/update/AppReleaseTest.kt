@@ -18,6 +18,14 @@ class AppReleaseTest {
     }
 
     @Test
+    fun autoPromptOncePerRemoteVersion() {
+        assertTrue(shouldAutoPromptUpdate(5, 0))
+        assertTrue(shouldAutoPromptUpdate(5, 4))
+        assertFalse(shouldAutoPromptUpdate(5, 5))
+        assertFalse(shouldAutoPromptUpdate(5, 6))
+    }
+
+    @Test
     fun parsesReleaseAndRejectsBadHash() {
         val release = parseAppRelease(
             """

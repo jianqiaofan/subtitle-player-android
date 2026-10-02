@@ -3,7 +3,6 @@ package com.jianqiaofan.subtitleplayer.ui.player
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -37,96 +37,55 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.jianqiaofan.subtitleplayer.data.AppPreferences
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jianqiaofan.subtitleplayer.data.ManagedScreenshot
-import com.jianqiaofan.subtitleplayer.data.MediaLibrary
 import com.jianqiaofan.subtitleplayer.data.OpenPersistentTree
-import com.jianqiaofan.subtitleplayer.data.ScreenshotScanner
-import com.jianqiaofan.subtitleplayer.domain.model.RecentFolder
-import com.jianqiaofan.subtitleplayer.domain.model.visibleLabel
 import com.jianqiaofan.subtitleplayer.domain.screenshot.ManagePagingMode
 import com.jianqiaofan.subtitleplayer.domain.screenshot.formatScreenshotStamp
 import com.jianqiaofan.subtitleplayer.domain.screenshot.groupManagedIndicesByPath
 import com.jianqiaofan.subtitleplayer.domain.screenshot.managePageCount
 import com.jianqiaofan.subtitleplayer.domain.screenshot.managePageIndices
 import com.jianqiaofan.subtitleplayer.domain.screenshot.screenshotDisplayTitle
+import com.jianqiaofan.subtitleplayer.domain.model.visibleLabel
 import com.jianqiaofan.subtitleplayer.ui.theme.SurfacePanel
 import com.jianqiaofan.subtitleplayer.ui.theme.WindowBackground
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @Composable
 fun ScreenshotManageDialog(
+    viewModel: ScreenshotManageViewModel,
     onDismiss: () -> Unit,
     onView: (items: List<ManagedScreenshot>, index: Int) -> Unit,
+    currentVideoOnly: Boolean = false,
+    onRefreshCurrentVideo: (() -> Unit)? = null,
 ) {
-    val context = LocalContext.current
-    val prefs = remember { AppPreferences(context.applicationContext) }
-    val library = remember { MediaLibrary(context.applicationContext) }
-    val scanner = remember { ScreenshotScanner(context.applicationContext) }
-    val scope = rememberCoroutineScope()
-
-    var folderUri by remember { mutableStateOf<String?>(null) }
-    var folderLabel by remember { mutableStateOf("") }
-    var recents by remember { mutableStateOf<List<RecentFolder>>(emptyList()) }
-    var items by remember { mutableStateOf<List<ManagedScreenshot>>(emptyList()) }
-    var scanning by remember { mutableStateOf(false) }
-    var paging by remember { mutableStateOf(ManagePagingMode.All) }
-    var pageIndex by remember { mutableIntStateOf(0) }
+    val manage by viewModel.manageState.collectAsStateWithLifecycle()
     var recentMenu by remember { mutableStateOf(false) }
-    var selectedRow by remember { mutableIntStateOf(-1) }
 
-    fun loadFolder(uri: Uri, name: String?) {
-        scope.launch {
-            library.persistTreePermission(uri)
-            val label = name?.ifBlank { null } ?: library.folderDisplayName(uri)
-            prefs.rememberScreenshotManageFolder(uri.toString(), label)
-            folderUri = uri.toString()
-            folderLabel = label
-            recents = prefs.screenshotManageRecentsOnce()
-            scanning = true
-            items = withContext(Dispatchers.IO) { scanner.scan(uri) }
-            scanning = false
-            pageIndex = 0
-            selectedRow = -1
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        recents = prefs.screenshotManageRecentsOnce()
-        val remembered = prefs.screenshotManageFolderOnce()
-        if (!remembered.isNullOrBlank()) {
-            val uri = Uri.parse(remembered)
-            if (library.hasPersistedAccess(uri)) {
-                loadFolder(uri, recents.firstOrNull { it.treeUri == remembered }?.displayName)
-            }
-        }
+    LaunchedEffect(currentVideoOnly) {
+        if (!currentVideoOnly) viewModel.prepare()
     }
 
     val picker = rememberLauncherForActivityResult(OpenPersistentTree()) { uri ->
-        if (uri != null) loadFolder(uri, null)
+        if (uri != null) viewModel.selectFolder(uri)
     }
 
-    val pathGroups = remember(items) { groupManagedIndicesByPath(items.map { it.relativeDir }) }
+    val pathGroups = remember(manage.items) { groupManagedIndicesByPath(manage.items.map { it.relativeDir }) }
+    val paging = if (currentVideoOnly) ManagePagingMode.All else manage.paging
     val pageCount = managePageCount(paging, pathGroups)
-    val safePage = pageIndex.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
-    val pageRows = managePageIndices(paging, pathGroups, items.size, safePage)
+    val safePage = manage.pageIndex.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+    val pageRows = managePageIndices(paging, pathGroups, manage.items.size, safePage)
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -142,45 +101,72 @@ fun ScreenshotManageDialog(
             Column(Modifier.fillMaxSize().padding(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("截图管理", color = Color.White, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                    IconButton(
+                        onClick = {
+                            if (currentVideoOnly) onRefreshCurrentVideo?.invoke()
+                            else viewModel.refreshFolder()
+                        },
+                        enabled = if (currentVideoOnly) {
+                            onRefreshCurrentVideo != null && !manage.scanning
+                        } else {
+                            !manage.folderUri.isNullOrBlank() && !manage.scanning
+                        },
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "刷新", tint = Color.White)
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
                     }
                 }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("文件夹", color = Color(0xFFDDDDDD), fontSize = 13.sp)
-                    OutlinedTextField(
-                        value = folderLabel.ifBlank { folderUri.orEmpty() },
-                        onValueChange = {},
-                        readOnly = true,
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
+                if (currentVideoOnly) {
+                    Text(
+                        text = "当前视频：${manage.folderLabel.ifBlank { "—" }}",
+                        color = Color(0xFFDDDDDD),
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth(),
                     )
-                    TextButton(onClick = { picker.launch(null) }) { Text("选择文件夹") }
-                    Box {
-                        TextButton(
-                            onClick = { recentMenu = true },
-                            enabled = recents.isNotEmpty(),
-                        ) { Text("最近打开") }
-                        DropdownMenu(expanded = recentMenu, onDismissRequest = { recentMenu = false }) {
-                            if (recents.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = { Text("暂无最近打开的文件夹") },
-                                    onClick = { recentMenu = false },
-                                    enabled = false,
-                                )
-                            } else {
-                                recents.forEach { folder ->
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("文件夹", color = Color(0xFFDDDDDD), fontSize = 13.sp)
+                        OutlinedTextField(
+                            value = manage.folderLabel.ifBlank { manage.folderUri.orEmpty() },
+                            onValueChange = {},
+                            readOnly = true,
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { picker.launch(null) }) { Text("选择文件夹") }
+                        Box {
+                            TextButton(
+                                onClick = { recentMenu = true },
+                                enabled = manage.recents.isNotEmpty(),
+                            ) { Text("最近打开") }
+                            DropdownMenu(expanded = recentMenu, onDismissRequest = { recentMenu = false }) {
+                                if (manage.recents.isEmpty()) {
                                     DropdownMenuItem(
-                                        text = { Text(folder.visibleLabel()) },
-                                        onClick = {
-                                            recentMenu = false
-                                            loadFolder(Uri.parse(folder.treeUri), folder.displayName)
-                                        },
+                                        text = { Text("暂无最近打开的文件夹") },
+                                        onClick = { recentMenu = false },
+                                        enabled = false,
                                     )
+                                } else {
+                                    manage.recents.forEach { folder ->
+                                        DropdownMenuItem(
+                                            text = { Text(folder.visibleLabel()) },
+                                            onClick = {
+                                                recentMenu = false
+                                                viewModel.selectFolder(
+                                                    Uri.parse(folder.treeUri),
+                                                    folder.displayName,
+                                                )
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -189,8 +175,12 @@ fun ScreenshotManageDialog(
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = when {
-                        scanning -> "正在扫描…"
-                        items.isNotEmpty() -> "共找到 ${items.size} 个截图（不含截屏保存导出的普通图片）。"
+                        manage.scanning -> "正在扫描…"
+                        currentVideoOnly && manage.items.isNotEmpty() ->
+                            "当前视频共 ${manage.items.size} 个截图。"
+                        currentVideoOnly -> "当前视频还没有截图。"
+                        manage.items.isNotEmpty() ->
+                            "共找到 ${manage.items.size} 个截图（不含截屏保存导出的普通图片）。"
                         else -> "需要有对应视频且 screenshots.json 有登记。截屏保存导出的普通图片不在此列。"
                     },
                     color = Color(0xFFBBBBBB),
@@ -204,55 +194,66 @@ fun ScreenshotManageDialog(
                         .fillMaxWidth()
                         .background(SurfacePanel, RoundedCornerShape(4.dp)),
                 ) {
-                    itemsIndexed(pageRows) { _, globalIndex ->
-                        val item = items[globalIndex]
-                        val selected = selectedRow == globalIndex
+                    itemsIndexed(pageRows) { pageLocalIndex, globalIndex ->
+                        val item = manage.items[globalIndex]
+                        val selected = manage.selectedRow == globalIndex
                         ManageTableRow(
                             index = globalIndex + 1,
                             item = item,
                             selected = selected,
-                            onSelect = { selectedRow = globalIndex },
-                            onView = { onView(items, globalIndex) },
+                            onSelect = { viewModel.setSelectedRow(globalIndex) },
+                            onView = {
+                                val pageItems = pageRows.map { manage.items[it] }
+                                onView(pageItems, pageLocalIndex)
+                            },
                         )
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("分页", color = Color.White, fontSize = 13.sp)
-                    RadioButton(selected = paging == ManagePagingMode.All, onClick = {
-                        paging = ManagePagingMode.All
-                        pageIndex = 0
-                    })
+                if (!currentVideoOnly) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("分页", color = Color.White, fontSize = 13.sp)
+                        RadioButton(
+                            selected = manage.paging == ManagePagingMode.All,
+                            onClick = { viewModel.setPaging(ManagePagingMode.All) },
+                        )
+                        Text(
+                            if (manage.paging == ManagePagingMode.All) "全部 ${manage.items.size} 条" else "全部",
+                            color = Color.White,
+                            modifier = Modifier.clickable { viewModel.setPaging(ManagePagingMode.All) },
+                        )
+                        RadioButton(
+                            selected = manage.paging == ManagePagingMode.ByPath,
+                            onClick = { viewModel.setPaging(ManagePagingMode.ByPath) },
+                        )
+                        Text(
+                            "按路径",
+                            color = Color.White,
+                            modifier = Modifier.clickable { viewModel.setPaging(ManagePagingMode.ByPath) },
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = { viewModel.setPageIndex((safePage - 1).coerceAtLeast(0)) },
+                            enabled = safePage > 0 && manage.paging == ManagePagingMode.ByPath,
+                        ) { Text("上一页") }
+                        Text(
+                            "第 ${if (pageCount == 0) 0 else safePage + 1}/$pageCount 页",
+                            color = Color.White,
+                        )
+                        TextButton(
+                            onClick = {
+                                viewModel.setPageIndex((safePage + 1).coerceAtMost(pageCount - 1))
+                            },
+                            enabled = safePage < pageCount - 1 && manage.paging == ManagePagingMode.ByPath,
+                        ) { Text("下一页") }
+                    }
+                } else {
+                    Spacer(Modifier.height(8.dp))
                     Text(
-                        if (paging == ManagePagingMode.All) "全部 ${items.size} 条" else "全部",
+                        text = "全部 ${manage.items.size} 条",
                         color = Color.White,
-                        modifier = Modifier.clickable {
-                            paging = ManagePagingMode.All
-                            pageIndex = 0
-                        },
+                        fontSize = 13.sp,
                     )
-                    RadioButton(selected = paging == ManagePagingMode.ByPath, onClick = {
-                        paging = ManagePagingMode.ByPath
-                        pageIndex = 0
-                    })
-                    Text(
-                        "按路径",
-                        color = Color.White,
-                        modifier = Modifier.clickable {
-                            paging = ManagePagingMode.ByPath
-                            pageIndex = 0
-                        },
-                    )
-                    Spacer(Modifier.weight(1f))
-                    TextButton(
-                        onClick = { pageIndex = (safePage - 1).coerceAtLeast(0) },
-                        enabled = safePage > 0 && paging == ManagePagingMode.ByPath,
-                    ) { Text("上一页") }
-                    Text("第 ${if (pageCount == 0) 0 else safePage + 1}/$pageCount 页", color = Color.White)
-                    TextButton(
-                        onClick = { pageIndex = (safePage + 1).coerceAtMost(pageCount - 1) },
-                        enabled = safePage < pageCount - 1 && paging == ManagePagingMode.ByPath,
-                    ) { Text("下一页") }
                 }
             }
         }

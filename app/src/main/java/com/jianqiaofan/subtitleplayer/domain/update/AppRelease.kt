@@ -28,6 +28,10 @@ data class AppRelease(
 fun isNewerRelease(localVersionCode: Int, remoteVersionCode: Int): Boolean =
     remoteVersionCode > localVersionCode
 
+/** Auto-prompt at most once per remote versionCode (after user has already been offered it). */
+fun shouldAutoPromptUpdate(remoteVersionCode: Int, lastPromptedVersionCode: Int): Boolean =
+    remoteVersionCode > lastPromptedVersionCode
+
 fun releaseUrlAllowed(url: String): Boolean {
     val uri = try {
         URI(url)

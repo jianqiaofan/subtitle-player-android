@@ -33,9 +33,9 @@ fun CloudPromptDialog(
 ) {
     when (prompt) {
         is CloudPrompt.Subtitles -> ChoiceDialog(
-            title = "写入云端字幕？",
+            title = "云端有新版字幕，是否更新？",
             body = prompt.lines.joinToString("\n") { "${it.fileName}    ${it.timeLabel}" },
-            confirm = "写入",
+            confirm = "更新",
             onConfirm = onAccept,
             onDismiss = onDismiss,
         )

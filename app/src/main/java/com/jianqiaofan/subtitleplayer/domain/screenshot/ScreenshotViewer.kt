@@ -61,21 +61,24 @@ fun resolveScreenshotStamp(jsonMillis: Long, fileMillis: Long): Long = when {
 }
 
 /**
- * Notes ordered by creation time. Multiple notes get `Note 1`…; a single note has no number title.
+ * Notes ordered by creation time. Always shows a title: `Note` when alone, else `Note 1`…
  */
-fun noteNumberLabel(notes: List<ScreenshotNote>, noteId: String): String? {
-    if (notes.size <= 1) return null
+fun noteNumberLabel(notes: List<ScreenshotNote>, noteId: String): String {
+    if (notes.size <= 1) return "Note"
     val ordered = notes.sortedWith(compareBy({ it.createdAt }, { it.id }))
-    val index = ordered.indexOfFirst { it.id == noteId }
-    if (index < 0) return null
+    val index = ordered.indexOfFirst { it.id == noteId }.coerceAtLeast(0)
     return "Note ${index + 1}"
 }
+
+/** Style-panel title matches the on-box label. */
+fun stylePanelNoteTitle(notes: List<ScreenshotNote>, noteId: String): String =
+    noteNumberLabel(notes, noteId)
 
 fun otherNumberedNotes(notes: List<ScreenshotNote>, exceptId: String): List<Pair<String, ScreenshotNote>> {
     if (notes.size <= 1) return emptyList()
     return notes
         .filter { it.id != exceptId }
-        .mapNotNull { note -> noteNumberLabel(notes, note.id)?.let { it to note } }
+        .map { note -> noteNumberLabel(notes, note.id) to note }
 }
 
 /**
@@ -94,12 +97,29 @@ fun reuseNoteStyle(target: ScreenshotNote, source: ScreenshotNote, nowMs: Long):
         font = normalizeFont(from.font),
         color = normalizeColor(from.color, NOTE_COLOR_BLACK),
         align = normalizeAlign(from.align),
+        valign = normalizeVAlign(from.valign),
+        titleBackground = from.titleBackground.trim().let {
+            if (it.isBlank()) "" else normalizeColor(it, "")
+        },
+        titleBold = from.titleBold,
+        titleItalic = from.titleItalic,
     )
     return target.copy(box = box, updatedAt = nowMs)
 }
 
 fun touchShotUpdated(shot: ScreenshotShot, notes: List<ScreenshotNote>, nowMs: Long): ScreenshotShot =
     shot.copy(notes = notes, updatedAt = nowMs)
+
+/** Meaningful content equality for viewer edits (ignores stamp-only bumps). */
+fun screenshotContentSame(a: ScreenshotShot, b: ScreenshotShot): Boolean {
+    if (a.id != b.id || a.title != b.title || a.time != b.time || a.frame != b.frame || a.image != b.image) {
+        return false
+    }
+    if (a.notes.size != b.notes.size) return false
+    return a.notes.zip(b.notes).all { (left, right) ->
+        left.id == right.id && left.text == right.text && left.box == right.box
+    }
+}
 
 /** Relative luminance 0…1 from sRGB bytes; threshold matches desktop (~0.55). */
 fun averageLuminance01(r: Int, g: Int, b: Int): Double =

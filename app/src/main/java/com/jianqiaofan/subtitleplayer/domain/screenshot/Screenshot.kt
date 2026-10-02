@@ -30,6 +30,8 @@ const val WEBP_QUALITY = 40
 const val FONT_PIXEL_REFERENCE = 480.0
 const val FONT_MIN = 0.02
 const val FONT_MAX = 0.16
+/** Default body font when a note has no saved size (slightly smaller than the old 0.06). */
+const val NOTE_DEFAULT_FONT = 0.045
 const val OPACITY_MIN = 0.15
 const val OPACITY_MAX = 1.0
 
@@ -71,10 +73,78 @@ data class NoteBox(
     val height: Double,
     val background: String = NOTE_COLOR_WHITE,
     val opacity: Double = 0.85,
-    val font: Double = 0.06,
+    val font: Double = NOTE_DEFAULT_FONT,
     val color: String = NOTE_COLOR_BLACK,
-    val align: String = "center",
+    val align: String = "left",
+    /** Vertical text alignment inside the box: top / middle / bottom. */
+    val valign: String = "top",
+    /** Title-bar fill; blank keeps the same background as the body. */
+    val titleBackground: String = "",
+    val titleBold: Boolean = false,
+    val titleItalic: Boolean = false,
 )
+
+/**
+ * One-tap seasonal styles for the note box.
+ * Sets body colors plus a distinct title-bar look; keeps position, size, font, and alignment.
+ * Names: 春日清新 / 夏日火热 / 秋天朴素 / 冬日静谧.
+ */
+data class NoteStylePreset(
+    val id: String,
+    val title: String,
+    val background: String,
+    val color: String,
+    val opacity: Double,
+    val titleBackground: String,
+    val titleBold: Boolean = true,
+    val titleItalic: Boolean = true,
+)
+
+val NOTE_STYLE_PRESETS = listOf(
+    NoteStylePreset(
+        id = "spring",
+        title = "春日清新",
+        background = "#E8F5E9",
+        color = "#1B5E20",
+        opacity = 0.90,
+        titleBackground = "#A5D6A7",
+    ),
+    NoteStylePreset(
+        id = "summer",
+        title = "夏日火热",
+        background = "#FFE0B2",
+        color = "#BF360C",
+        opacity = 0.92,
+        titleBackground = "#FFB74D",
+    ),
+    NoteStylePreset(
+        id = "autumn",
+        title = "秋天朴素",
+        background = "#EFEBE9",
+        color = "#3E2723",
+        opacity = 0.90,
+        titleBackground = "#BCAAA4",
+    ),
+    NoteStylePreset(
+        id = "winter",
+        title = "冬日静谧",
+        background = "#E3F2FD",
+        color = "#0D47A1",
+        opacity = 0.92,
+        titleBackground = "#90CAF9",
+    ),
+)
+
+/** Apply preset colors + title chrome; keep position, size, font, and alignment. */
+fun applyNoteStylePreset(box: NoteBox, preset: NoteStylePreset): NoteBox =
+    box.copy(
+        background = normalizeColor(preset.background, NOTE_COLOR_WHITE),
+        opacity = normalizeOpacity(preset.opacity),
+        color = normalizeColor(preset.color, NOTE_COLOR_BLACK),
+        titleBackground = normalizeColor(preset.titleBackground, preset.background),
+        titleBold = preset.titleBold,
+        titleItalic = preset.titleItalic,
+    )
 
 data class ScreenshotNote(
     val id: String,
@@ -142,7 +212,8 @@ fun newScreenshotId(random: SecureRandom = SecureRandom()): String {
 
 const val NOTE_MIN_WIDTH = 0.04
 const val NOTE_MIN_HEIGHT = 0.03
-const val NOTE_PANEL_WIDTH_DP = 208
+const val NOTE_PANEL_WIDTH_DP = 300
+const val NOTE_PANEL_HEIGHT_DP = 300
 const val NOTE_TITLE_MAX_CHARS = 26
 const val NOTE_EDGE_HIT_PX = 40f
 const val NOTE_HANDLE_SIZE_DP = 28
@@ -151,6 +222,8 @@ const val NOTE_CUE_PICK_BEFORE = 200
 const val NOTE_CUE_PICK_AFTER = 200
 const val NOTE_CHIP_LABEL_CHARS = 12
 const val NOTE_ACTIVE_BORDER_HEX = "#E2C6FF"
+/** Line height relative to font size (Compose sp / StaticLayout multiplier). */
+const val NOTE_LINE_HEIGHT_MULT = 1.35f
 
 data class NearbyCueWindow(
     val cues: List<SubtitleCue>,
@@ -428,7 +501,15 @@ fun normalizeOpacity(raw: Double): Double = raw.coerceIn(OPACITY_MIN, OPACITY_MA
 
 fun normalizeAlign(raw: String?): String = when (raw?.trim()?.lowercase()) {
     "left", "center", "right" -> raw.trim().lowercase()
-    else -> "center"
+    else -> "left"
+}
+
+fun normalizeVAlign(raw: String?): String = when (raw?.trim()?.lowercase()) {
+    "top", "middle", "center", "bottom" -> {
+        val v = raw.trim().lowercase()
+        if (v == "center") "middle" else v
+    }
+    else -> "top"
 }
 
 fun normalizeColor(raw: String?, fallback: String): String {
@@ -680,7 +761,11 @@ internal fun encodeNotes(notes: List<ScreenshotNote>): String = buildString {
             append("\"opacity\":${jsonNumber(box.opacity)},")
             append("\"font\":${jsonNumber(box.font)},")
             append("\"color\":${jsonString(box.color)},")
-            append("\"align\":${jsonString(box.align)}}")
+            append("\"align\":${jsonString(box.align)},")
+            append("\"valign\":${jsonString(box.valign)},")
+            append("\"title_background\":${jsonString(box.titleBackground)},")
+            append("\"title_bold\":${if (box.titleBold) "true" else "false"},")
+            append("\"title_italic\":${if (box.titleItalic) "true" else "false"}}")
         }
         append('}')
     }
@@ -739,6 +824,13 @@ private fun parseNote(obj: JsonValue.Obj?): ScreenshotNote? {
 
 private fun parseBox(map: Map<String, JsonValue>): NoteBox {
     fun num(key: String, fallback: Double): Double = (map[key] as? JsonValue.Num)?.value ?: fallback
+    fun bool(key: String, fallback: Boolean): Boolean = when (val v = map[key]) {
+        is JsonValue.Bool -> v.value
+        is JsonValue.Num -> v.value != 0.0
+        is JsonValue.Str -> v.value.trim().lowercase() in setOf("true", "1", "yes")
+        else -> fallback
+    }
+    val titleBgRaw = map.str("title_background").orEmpty().trim()
     return NoteBox(
         x = num("x", 0.08).coerceIn(0.0, 1.0),
         y = num("y", 0.62).coerceIn(0.0, 1.0),
@@ -746,9 +838,13 @@ private fun parseBox(map: Map<String, JsonValue>): NoteBox {
         height = num("height", 0.28).coerceIn(0.0, 1.0),
         background = normalizeColor(map.str("background"), NOTE_COLOR_WHITE),
         opacity = normalizeOpacity(num("opacity", 0.85)),
-        font = normalizeFont(num("font", 0.06)),
+        font = normalizeFont(num("font", NOTE_DEFAULT_FONT)),
         color = normalizeColor(map.str("color"), NOTE_COLOR_BLACK),
         align = normalizeAlign(map.str("align")),
+        valign = normalizeVAlign(map.str("valign")),
+        titleBackground = if (titleBgRaw.isBlank()) "" else normalizeColor(titleBgRaw, ""),
+        titleBold = bool("title_bold", false),
+        titleItalic = bool("title_italic", false),
     )
 }
 

@@ -36,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -43,6 +44,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,11 +67,11 @@ import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotShot
 import com.jianqiaofan.subtitleplayer.domain.screenshot.TIP_ID_SCREENSHOT_EXPORT
 import com.jianqiaofan.subtitleplayer.domain.screenshot.VIEWER_MODE_HINT
 import com.jianqiaofan.subtitleplayer.domain.screenshot.averageLuminance01
-import com.jianqiaofan.subtitleplayer.domain.screenshot.displayBox
 import com.jianqiaofan.subtitleplayer.domain.screenshot.fittedImageRect
 import com.jianqiaofan.subtitleplayer.domain.screenshot.noteNumberLabel
 import com.jianqiaofan.subtitleplayer.domain.screenshot.otherNumberedNotes
 import com.jianqiaofan.subtitleplayer.domain.screenshot.reuseNoteStyle
+import com.jianqiaofan.subtitleplayer.domain.screenshot.screenshotContentSame
 import com.jianqiaofan.subtitleplayer.domain.screenshot.screenshotExportFileName
 import com.jianqiaofan.subtitleplayer.domain.screenshot.touchShotUpdated
 import com.jianqiaofan.subtitleplayer.domain.screenshot.viewerControlsOnLight
@@ -92,14 +94,19 @@ fun ScreenshotViewerOverlay(
     items: List<ViewerItem>,
     initialIndex: Int,
     loadImage: suspend (ViewerItem) -> ByteArray?,
-    onSaveShot: (ViewerItem, ScreenshotShot) -> Unit,
     onEditShot: (ViewerItem) -> Unit,
-    onClose: () -> Unit,
+    /** Remove the overlay from the composition (close / back). */
+    onDismissRequest: () -> Unit,
+    /** Fired once when the overlay leaves; [dirtyItems] should be written then synced. */
+    onSessionEnd: (dirtyItems: List<ViewerItem>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) return
-    var index by remember(items) { mutableIntStateOf(initialIndex.coerceIn(0, items.lastIndex)) }
-    var shot by remember(items, index) { mutableStateOf(items[index].shot) }
+    val baseline = remember(items.map { it.shot.id }) { items.associate { it.shot.id to it.shot } }
+    var sessionItems by remember { mutableStateOf(items) }
+    var index by remember { mutableIntStateOf(initialIndex.coerceIn(0, items.lastIndex)) }
+    if (index > sessionItems.lastIndex) index = sessionItems.lastIndex
+    var shot by remember { mutableStateOf(sessionItems[index.coerceIn(0, sessionItems.lastIndex)].shot) }
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var activeNoteId by remember { mutableStateOf<String?>(null) }
     var showStylePanel by remember { mutableStateOf(false) }
@@ -108,7 +115,8 @@ fun ScreenshotViewerOverlay(
     var blankMenuOffset by remember { mutableStateOf(Offset.Zero) }
     var noteMenu by remember { mutableStateOf<ScreenshotNote?>(null) }
     var noteMenuOffset by remember { mutableStateOf(Offset.Zero) }
-    var editingNote by remember { mutableStateOf<ScreenshotNote?>(null) }
+    var pendingDeleteNote by remember { mutableStateOf<ScreenshotNote?>(null) }
+    var dialogEditNote by remember { mutableStateOf<ScreenshotNote?>(null) }
     var showExportTip by remember { mutableStateOf(false) }
     var pendingExport by remember { mutableStateOf(false) }
     var lightControls by remember { mutableStateOf(false) }
@@ -117,27 +125,70 @@ fun ScreenshotViewerOverlay(
     val context = LocalContext.current
     val prefs = remember { AppPreferences(context.applicationContext) }
 
+    fun cacheShot(next: ScreenshotShot) {
+        shot = next
+        sessionItems = sessionItems.map { entry ->
+            if (entry.shot.id != next.id) entry
+            else entry.copy(shot = next, managed = entry.managed?.copy(shot = next))
+        }
+    }
+
+    fun dirtyItems(): List<ViewerItem> =
+        sessionItems.filter { item ->
+            val original = baseline[item.shot.id]
+            original == null || !screenshotContentSame(original, item.shot)
+        }
+
+    val sessionEnded = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val latestSessionEnd = rememberUpdatedState(onSessionEnd)
+    val latestSessionItems = rememberUpdatedState(sessionItems)
+    val latestBaseline = rememberUpdatedState(baseline)
+
+    fun endSession(dirty: List<ViewerItem>) {
+        if (!sessionEnded.compareAndSet(false, true)) return
+        latestSessionEnd.value(dirty)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (!sessionEnded.compareAndSet(false, true)) return@onDispose
+            val items = latestSessionItems.value
+            val base = latestBaseline.value
+            val dirty = items.filter { item ->
+                val original = base[item.shot.id]
+                original == null || !screenshotContentSame(original, item.shot)
+            }
+            latestSessionEnd.value(dirty)
+        }
+    }
+
     LaunchedEffect(Unit) {
         delay(3_000)
         showModeHint = false
     }
 
-    LaunchedEffect(index, items) {
-        val item = items.getOrNull(index) ?: return@LaunchedEffect
+    // Adopt parent-supplied shot updates (e.g. full-screen edit dialog) into the session cache.
+    LaunchedEffect(items) {
+        val byId = items.associateBy { it.shot.id }
+        sessionItems = sessionItems.map { local ->
+            val incoming = byId[local.shot.id] ?: return@map local
+            if (incoming.shot != local.shot) incoming else local
+        }
+        sessionItems.getOrNull(index)?.let { shot = it.shot }
+    }
+
+    val currentShotId = sessionItems.getOrNull(index)?.shot?.id
+    LaunchedEffect(index, currentShotId) {
+        val item = sessionItems.getOrNull(index) ?: return@LaunchedEffect
         shot = item.shot
         activeNoteId = null
         showStylePanel = false
-        bitmap?.recycle()
-        bitmap = null
+        val previous = bitmap
         val bytes = loadImage(item)
         val decoded = bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
         bitmap = decoded
+        previous?.recycle()
         lightControls = decoded?.let { sampleCornerLuminance(it) }?.let { viewerControlsOnLight(it) } == true
-    }
-
-    fun persist(next: ScreenshotShot) {
-        shot = next
-        onSaveShot(items[index], next)
     }
 
     fun updateNoteBox(noteId: String, box: NoteBox, commit: Boolean) {
@@ -147,14 +198,7 @@ fun ScreenshotViewerOverlay(
             else note.copy(box = box, updatedAt = if (commit) now else note.updatedAt)
         }
         val next = if (commit) touchShotUpdated(shot, notes, now) else shot.copy(notes = notes)
-        shot = next
-        if (commit) onSaveShot(items[index], next)
-    }
-
-    fun commitNote(noteId: String) {
-        val note = shot.notes.find { it.id == noteId } ?: return
-        val box = note.box ?: displayBox(note)
-        updateNoteBox(noteId, box, commit = true)
+        if (commit) cacheShot(next) else shot = next
     }
 
     val exportLauncher = rememberLauncherForActivityResult(CreateJpegDocument()) { uri ->
@@ -193,18 +237,23 @@ fun ScreenshotViewerOverlay(
         }
     }
 
-    BackHandler { onClose() }
+    fun dismiss() {
+        endSession(dirtyItems())
+        onDismissRequest()
+    }
+
+    BackHandler { dismiss() }
 
     Box(
         modifier
             .fillMaxSize()
             .background(Color.Black)
-            .pointerInput(index, items.size) {
+            .pointerInput(index, sessionItems.size) {
                 detectHorizontalDragGestures(
                     onDragEnd = {
                         when {
                             dragAccum > 80f && index > 0 -> index -= 1
-                            dragAccum < -80f && index < items.lastIndex -> index += 1
+                            dragAccum < -80f && index < sessionItems.lastIndex -> index += 1
                         }
                         dragAccum = 0f
                     },
@@ -255,6 +304,7 @@ fun ScreenshotViewerOverlay(
             )
             NoteOverlayLayer(
                 notes = shot.notes,
+                shotId = shot.id,
                 imageLeft = fitted.left,
                 imageTop = fitted.top,
                 imageWidth = fitted.width,
@@ -264,7 +314,6 @@ fun ScreenshotViewerOverlay(
                 onActivate = { activeNoteId = it },
                 onShowStylePanel = { showStylePanel = it },
                 onBoxChanged = ::updateNoteBox,
-                onCommitNote = ::commitNote,
                 onNoteLongPress = { note, offset ->
                     noteMenu = note
                     noteMenuOffset = offset
@@ -274,7 +323,7 @@ fun ScreenshotViewerOverlay(
 
         ViewerChromeButton(
             onLight = lightControls,
-            onClick = onClose,
+            onClick = { dismiss() },
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(10.dp),
@@ -292,14 +341,23 @@ fun ScreenshotViewerOverlay(
             ViewerChromeButton(
                 onLight = lightControls,
                 enabled = index > 0,
-                onClick = { if (index > 0) index -= 1 },
+                onClick = {
+                    if (index > 0) index -= 1
+                },
             ) {
                 Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "上一图")
             }
+            Text(
+                text = "${index + 1}/${sessionItems.size}",
+                color = if (lightControls) Color(0xFF1A1A1A) else Color(0xFFEDE7F6),
+                fontSize = 13.sp,
+            )
             ViewerChromeButton(
                 onLight = lightControls,
-                enabled = index < items.lastIndex,
-                onClick = { if (index < items.lastIndex) index += 1 },
+                enabled = index < sessionItems.lastIndex,
+                onClick = {
+                    if (index < sessionItems.lastIndex) index += 1
+                },
             ) {
                 Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "下一图")
             }
@@ -335,7 +393,7 @@ fun ScreenshotViewerOverlay(
                 text = { Text("编辑截图") },
                 onClick = {
                     blankMenu = false
-                    onEditShot(items[index].copy(shot = shot))
+                    onEditShot(sessionItems[index].copy(shot = shot))
                 },
             )
             DropdownMenuItem(
@@ -359,7 +417,7 @@ fun ScreenshotViewerOverlay(
                 DropdownMenuItem(
                     text = { Text("编辑笔记") },
                     onClick = {
-                        editingNote = menuNote
+                        dialogEditNote = menuNote
                         noteMenu = null
                     },
                 )
@@ -370,27 +428,46 @@ fun ScreenshotViewerOverlay(
                             val now = System.currentTimeMillis()
                             val updated = reuseNoteStyle(menuNote, source, now)
                             val notes = shot.notes.map { if (it.id == updated.id) updated else it }
-                            persist(touchShotUpdated(shot, notes, now))
+                            cacheShot(touchShotUpdated(shot, notes, now))
                             noteMenu = null
                         },
                     )
                 }
-                val deleteLabel = noteNumberLabel(shot.notes, menuNote.id)?.let { "删除 $it 笔记" } ?: "删除笔记"
+                val deleteLabel = "删除 ${noteNumberLabel(shot.notes, menuNote.id)} 笔记"
                 DropdownMenuItem(
                     text = { Text(deleteLabel) },
                     onClick = {
-                        val now = System.currentTimeMillis()
-                        val notes = shot.notes.filterNot { it.id == menuNote.id }
-                        persist(touchShotUpdated(shot, notes, now))
-                        if (activeNoteId == menuNote.id) {
-                            activeNoteId = null
-                            showStylePanel = false
-                        }
+                        pendingDeleteNote = menuNote
                         noteMenu = null
                     },
                 )
             }
         }
+    }
+
+    val notePendingDelete = pendingDeleteNote
+    if (notePendingDelete != null) {
+        val label = noteNumberLabel(shot.notes, notePendingDelete.id)
+        AlertDialog(
+            onDismissRequest = { pendingDeleteNote = null },
+            title = { Text("确认删除") },
+            text = { Text("确定删除 $label 笔记？删除后不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val now = System.currentTimeMillis()
+                    val notes = shot.notes.filterNot { it.id == notePendingDelete.id }
+                    cacheShot(touchShotUpdated(shot, notes, now))
+                    if (activeNoteId == notePendingDelete.id) {
+                        activeNoteId = null
+                        showStylePanel = false
+                    }
+                    pendingDeleteNote = null
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteNote = null }) { Text("取消") }
+            },
+        )
     }
 
     if (showExportTip) {
@@ -416,11 +493,11 @@ fun ScreenshotViewerOverlay(
         )
     }
 
-    val noteToEdit = editingNote
+    val noteToEdit = dialogEditNote
     if (noteToEdit != null) {
         var draft by remember(noteToEdit.id) { mutableStateOf(noteToEdit.text) }
         AlertDialog(
-            onDismissRequest = { editingNote = null },
+            onDismissRequest = { dialogEditNote = null },
             title = { Text("编辑笔记") },
             text = {
                 OutlinedTextField(
@@ -436,52 +513,59 @@ fun ScreenshotViewerOverlay(
                     val notes = shot.notes.map {
                         if (it.id == noteToEdit.id) it.copy(text = draft, updatedAt = now) else it
                     }
-                    persist(touchShotUpdated(shot, notes, now))
-                    editingNote = null
+                    cacheShot(touchShotUpdated(shot, notes, now))
+                    dialogEditNote = null
                 }) { Text("保存") }
             },
             dismissButton = {
-                TextButton(onClick = { editingNote = null }) { Text("取消") }
+                TextButton(onClick = { dialogEditNote = null }) { Text("取消") }
             },
         )
     }
 }
 
 @Composable
-private fun ViewerChromeButton(
+internal fun ViewerChromeButton(
     onLight: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val bg = if (onLight) Color(0xCC1A1A1A) else Color(0xCCF5F0FF)
-    val fg = if (onLight) Color(0xFFFFE14A) else Color(0xFF3A2458)
-    val border = Color(0xFFFFE14A)
+    val bg = if (onLight) Color(0xCC1A1A1A) else Color(0xCCEDE7F6)
+    val fg = if (onLight) Color(0xFFFFE14A) else Color(0xFF4A148C)
     IconButton(
         onClick = onClick,
         enabled = enabled,
         modifier = modifier
-            .size(44.dp)
-            .background(bg, RoundedCornerShape(10.dp))
-            .border(1.dp, border.copy(alpha = if (enabled) 0.9f else 0.35f), RoundedCornerShape(10.dp)),
+            .background(bg, RoundedCornerShape(8.dp))
+            .border(1.dp, Color(0xFFFFE14A).copy(alpha = if (onLight) 0.9f else 0.55f), RoundedCornerShape(8.dp)),
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            androidx.compose.runtime.CompositionLocalProvider(
-                androidx.compose.material3.LocalContentColor provides fg.copy(alpha = if (enabled) 1f else 0.35f),
-            ) { content() }
-        }
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.material3.LocalContentColor provides if (enabled) fg else fg.copy(alpha = 0.35f),
+        ) { content() }
     }
 }
 
 private fun sampleCornerLuminance(bitmap: Bitmap): Double {
     val w = bitmap.width.coerceAtLeast(1)
     val h = bitmap.height.coerceAtLeast(1)
-    val x = (w * 0.88f).roundToInt().coerceIn(0, w - 1)
-    val y = (h * 0.45f).roundToInt().coerceIn(0, h - 1)
-    val sample = bitmap.getPixel(x, y)
-    val r = (sample shr 16) and 0xFF
-    val g = (sample shr 8) and 0xFF
-    val b = sample and 0xFF
-    return averageLuminance01(r, g, b)
+    val samples = listOf(
+        0 to 0,
+        w - 1 to 0,
+        0 to h - 1,
+        w - 1 to h - 1,
+        w / 2 to 0,
+        w / 2 to h - 1,
+    )
+    var sum = 0.0
+    for ((x, y) in samples) {
+        val c = bitmap.getPixel(x.coerceIn(0, w - 1), y.coerceIn(0, h - 1))
+        sum += averageLuminance01(
+            android.graphics.Color.red(c),
+            android.graphics.Color.green(c),
+            android.graphics.Color.blue(c),
+        )
+    }
+    return sum / samples.size
 }

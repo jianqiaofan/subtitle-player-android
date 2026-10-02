@@ -24,7 +24,7 @@ private const val UNIQUE_TEXT_GAP_SEC = 1.0
 val TAG_CATEGORIES = listOf(
     // 「还没想好」must stay last in 通用.
     "通用" to listOf("重点", "难点", "易错", "新章节", "新页面", "重要断点", "已掌握", "待复习", "存疑", "还没想好"),
-    "备考" to listOf("真题", "得分点", "技巧", "必背", "口诀", "案例"),
+    "备考" to listOf("真题", "案例", "考前扫一眼", "技巧", "必背", "口诀"),
     "语言学习" to listOf("单词", "语法", "发音", "短语", "地道表达"),
     "电影" to listOf("佳句", "反复练听", "跟读", "长难句", "俚语", "文化背景", "名场面"),
 )
@@ -41,7 +41,8 @@ private val TAG_PRIORITY = listOf(
     "反复练听",
     "跟读",
     "真题",
-    "得分点",
+    "案例",
+    "考前扫一眼",
     "必背",
     "单词",
     "语法",
@@ -52,7 +53,6 @@ private val TAG_PRIORITY = listOf(
     "俚语",
     "技巧",
     "口诀",
-    "案例",
     "文化背景",
     "名场面",
     "新章节",
@@ -75,11 +75,11 @@ fun tagPalette(name: String): TagPalette = when (name) {
     "存疑" -> TagPalette(0xFF5A2048, 0xFFFFB0D0)
     "还没想好" -> TagPalette(0xFF3A3A42, 0xFFD0D0D8)
     "真题" -> TagPalette(0xFF5C2840, 0xFFFFB3C7)
-    "得分点" -> TagPalette(0xFF6B3A28, 0xFFFFC2A8)
+    "案例" -> TagPalette(0xFF3D4A28, 0xFFD5E8A8)
+    "考前扫一眼", "得分点" -> TagPalette(0xFF6B3A28, 0xFFFFC2A8)
     "技巧" -> TagPalette(0xFF4A3820, 0xFFF0D0A0)
     "必背" -> TagPalette(0xFF6B2848, 0xFFFFB0C8)
     "口诀" -> TagPalette(0xFF5A4030, 0xFFF5D0B0)
-    "案例" -> TagPalette(0xFF3D4A28, 0xFFD5E8A8)
     "单词" -> TagPalette(0xFF243A5C, 0xFFB9D0FF)
     "语法" -> TagPalette(0xFF2A3058, 0xFFC4C0FF)
     "发音" -> TagPalette(0xFF1E4558, 0xFFA8E4FF)

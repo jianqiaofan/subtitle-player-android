@@ -13,11 +13,14 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import com.jianqiaofan.subtitleplayer.domain.screenshot.MAX_WEBP_BYTES
 import com.jianqiaofan.subtitleplayer.domain.screenshot.NOTE_COLOR_BLACK
+import com.jianqiaofan.subtitleplayer.domain.screenshot.NOTE_LINE_HEIGHT_MULT
 import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotNote
 import com.jianqiaofan.subtitleplayer.domain.screenshot.WEBP_MAX_EDGE
 import com.jianqiaofan.subtitleplayer.domain.screenshot.WEBP_QUALITY
 import com.jianqiaofan.subtitleplayer.domain.screenshot.displayBox
 import com.jianqiaofan.subtitleplayer.domain.screenshot.fittedEdge
+import com.jianqiaofan.subtitleplayer.domain.screenshot.normalizeVAlign
+import com.jianqiaofan.subtitleplayer.domain.screenshot.noteNumberLabel
 import java.io.ByteArrayOutputStream
 import kotlin.math.roundToInt
 
@@ -81,24 +84,63 @@ fun renderAnnotatedJpeg(source: Bitmap, notes: List<ScreenshotNote>, showNotes: 
 
 private fun drawNotes(canvas: Canvas, width: Int, height: Int, notes: List<ScreenshotNote>) {
     for (note in notes) {
-        if (note.text.isBlank()) continue
         val box = displayBox(note)
         val left = (box.x * width).toFloat()
         val top = (box.y * height).toFloat()
         val boxWidth = (box.width * width).toFloat().coerceAtLeast(1f)
         val boxHeight = (box.height * height).toFloat().coerceAtLeast(1f)
+        val bodyAlpha = (box.opacity.coerceIn(0.0, 1.0) * 255).roundToInt().coerceIn(0, 255)
         val background = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = parseAndroidColor(box.background)
-            alpha = (box.opacity.coerceIn(0.0, 1.0) * 255).roundToInt().coerceIn(0, 255)
+            alpha = bodyAlpha
             style = Paint.Style.FILL
         }
         canvas.drawRect(left, top, left + boxWidth, top + boxHeight, background)
+
+        val pad = height * 0.012f
+        val titleLabel = noteNumberLabel(notes, note.id)
+        val titleSize = (box.font * height * 0.72f).toFloat().coerceAtLeast(8f)
+        val titleStyle = when {
+            box.titleBold && box.titleItalic -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+            box.titleBold -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            box.titleItalic -> Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            else -> Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+        }
+        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseAndroidColor(box.color.ifBlank { NOTE_COLOR_BLACK })
+            textSize = titleSize
+            typeface = titleStyle
+            alpha = (0.92f * 255).roundToInt()
+        }
+        val titleLayoutWidth = (boxWidth - pad * 2).roundToInt().coerceAtLeast(1)
+        val titleLayout = StaticLayout.Builder.obtain(titleLabel, 0, titleLabel.length, titlePaint, titleLayoutWidth)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setLineSpacing(0f, NOTE_LINE_HEIGHT_MULT)
+            .setIncludePad(false)
+            .setMaxLines(1)
+            .build()
+        val titleBarH = (titleLayout.height + pad).coerceAtMost(boxHeight * 0.45f)
+        val titleBgHex = box.titleBackground.trim()
+        if (titleBgHex.isNotEmpty()) {
+            val titleBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = parseAndroidColor(titleBgHex)
+                alpha = bodyAlpha
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(left, top, left + boxWidth, top + titleBarH, titleBg)
+        }
+        canvas.save()
+        canvas.translate(left + pad, top + pad * 0.4f)
+        canvas.clipRect(0f, 0f, titleLayoutWidth.toFloat(), titleBarH)
+        titleLayout.draw(canvas)
+        canvas.restore()
+
+        if (note.text.isBlank()) continue
         val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = parseAndroidColor(box.color.ifBlank { NOTE_COLOR_BLACK })
             textSize = (box.font * height).toFloat().coerceAtLeast(8f)
             typeface = Typeface.DEFAULT
         }
-        val pad = height * 0.012f
         val layoutWidth = (boxWidth - pad * 2).roundToInt().coerceAtLeast(1)
         val layout = StaticLayout.Builder.obtain(note.text, 0, note.text.length, paint, layoutWidth)
             .setAlignment(
@@ -108,11 +150,19 @@ private fun drawNotes(canvas: Canvas, width: Int, height: Int, notes: List<Scree
                     else -> Layout.Alignment.ALIGN_CENTER
                 },
             )
+            .setLineSpacing(0f, NOTE_LINE_HEIGHT_MULT)
             .setIncludePad(false)
             .build()
+        val contentTop = top + titleBarH
+        val availH = (boxHeight - titleBarH - pad).coerceAtLeast(1f)
+        val dy = when (normalizeVAlign(box.valign)) {
+            "middle" -> ((availH - layout.height) / 2f).coerceAtLeast(0f)
+            "bottom" -> (availH - layout.height).coerceAtLeast(0f)
+            else -> 0f
+        }
         canvas.save()
-        canvas.translate(left + pad, top + pad)
-        canvas.clipRect(0f, 0f, layoutWidth.toFloat(), (boxHeight - pad * 2).coerceAtLeast(1f))
+        canvas.translate(left + pad, contentTop + dy)
+        canvas.clipRect(0f, 0f, layoutWidth.toFloat(), availH)
         layout.draw(canvas)
         canvas.restore()
     }

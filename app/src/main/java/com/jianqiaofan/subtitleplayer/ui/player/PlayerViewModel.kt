@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
 import com.jianqiaofan.subtitleplayer.data.CloudRepository
 import com.jianqiaofan.subtitleplayer.data.DeviceNetwork
+import com.jianqiaofan.subtitleplayer.data.ManagedScreenshot
 import com.jianqiaofan.subtitleplayer.data.MediaBundleFiles
 import com.jianqiaofan.subtitleplayer.data.MediaLibrary
 import com.jianqiaofan.subtitleplayer.data.ScreenshotRepository
@@ -41,7 +42,10 @@ import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
 import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotNote
 import com.jianqiaofan.subtitleplayer.domain.screenshot.ScreenshotShot
 import com.jianqiaofan.subtitleplayer.domain.screenshot.frameIndexAt
+import com.jianqiaofan.subtitleplayer.domain.screenshot.managedRelativePath
 import com.jianqiaofan.subtitleplayer.domain.screenshot.newScreenshotId
+import com.jianqiaofan.subtitleplayer.domain.screenshot.screenshotContentSame
+import com.jianqiaofan.subtitleplayer.domain.screenshot.sortedScreenshots
 import com.jianqiaofan.subtitleplayer.domain.screenshot.suggestedScreenshotTitle
 import com.jianqiaofan.subtitleplayer.domain.model.subtitleFormatOf
 import com.jianqiaofan.subtitleplayer.domain.playbacklog.PlaybackLog
@@ -237,6 +241,19 @@ class PlayerViewModel(
         ),
     )
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
+
+    /** Bundle locations edited in the current-video viewer; cloud sync runs once on close. */
+    private val pendingViewerCloudSync = linkedMapOf<String, PendingViewerScreenshotSync>()
+    private var viewerSaveJob: Job? = null
+
+    private data class PendingViewerScreenshotSync(
+        val treeUri: Uri,
+        val bundleUri: Uri,
+        val mediaUri: Uri,
+        val mediaName: String,
+        val mediaPath: String,
+        val knownHash: String?,
+    )
 
     init {
         viewModelScope.launch { preparePlayback() }
@@ -603,29 +620,89 @@ class PlayerViewModel(
     }
 
     fun saveViewerShot(item: ViewerItem, shot: ScreenshotShot) {
-        viewModelScope.launch {
-            val managed = item.managed
-            if (managed != null) {
-                val error = screenshotsRepo.save(managed.treeUri, managed.bundleUri, shot)
+        if (item.managed != null) return
+        if (screenshotContentSame(item.shot, shot)) return
+        viewerSaveJob = viewModelScope.launch {
+            val bundle = screenshotBundle() ?: return@launch
+            val error = screenshotsRepo.save(bundle.first, bundle.second, shot)
+            if (!error.isNullOrBlank()) {
+                showTransientMessage(error)
+                return@launch
+            }
+            refreshScreenshots()
+            markViewerCloudSync(
+                bundle.first,
+                bundle.second,
+                Uri.parse(mediaUriString),
+                resolvedMediaName,
+                mediaUriString,
+                videoHash,
+            )
+        }
+    }
+
+    /** Persist viewer-session edits once when leaving look mode (not on each note tweak). */
+    fun commitViewerEdits(dirty: List<ViewerItem>) {
+        if (dirty.isEmpty()) return
+        viewerSaveJob = viewModelScope.launch {
+            for (item in dirty) {
+                if (item.managed != null) continue
+                val bundle = screenshotBundle() ?: continue
+                val error = screenshotsRepo.save(bundle.first, bundle.second, item.shot)
                 if (!error.isNullOrBlank()) {
                     showTransientMessage(error)
-                    return@launch
+                    continue
                 }
-                screenshotsRepo.sync(
-                    managed.treeUri,
-                    managed.bundleUri,
-                    managed.mediaUri,
-                    managed.mediaName,
-                    managed.mediaUri.toString(),
-                    null,
+                markViewerCloudSync(
+                    bundle.first,
+                    bundle.second,
+                    Uri.parse(mediaUriString),
+                    resolvedMediaName,
+                    mediaUriString,
+                    videoHash,
                 )
-                if (library.sameDocument(managed.mediaUri, Uri.parse(mediaUriString))) {
-                    refreshScreenshots()
-                }
-            } else {
-                saveScreenshot(shot)
+            }
+            refreshScreenshots()
+        }
+    }
+
+    /** Flush deferred screenshot uploads after the current-video viewer closes. */
+    fun flushViewerCloudSync() {
+        viewModelScope.launch {
+            viewerSaveJob?.join()
+            val targets = pendingViewerCloudSync.values.toList()
+            pendingViewerCloudSync.clear()
+            if (targets.isEmpty()) return@launch
+            for (target in targets) {
+                screenshotsRepo.sync(
+                    target.treeUri,
+                    target.bundleUri,
+                    target.mediaUri,
+                    target.mediaName,
+                    target.mediaPath,
+                    target.knownHash,
+                )
+                refreshScreenshots()
             }
         }
+    }
+
+    private fun markViewerCloudSync(
+        treeUri: Uri,
+        bundleUri: Uri,
+        mediaUri: Uri,
+        mediaName: String,
+        mediaPath: String,
+        knownHash: String?,
+    ) {
+        pendingViewerCloudSync["$treeUri|$bundleUri"] = PendingViewerScreenshotSync(
+            treeUri = treeUri,
+            bundleUri = bundleUri,
+            mediaUri = mediaUri,
+            mediaName = mediaName,
+            mediaPath = mediaPath,
+            knownHash = knownHash,
+        )
     }
 
     fun cuesForViewerItem(item: ViewerItem): List<com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue> {
@@ -634,6 +711,32 @@ class PlayerViewModel(
             _state.value.cues
         } else {
             emptyList()
+        }
+    }
+
+    /** Reload local screenshots after manage flow edits the current video. */
+    fun reloadScreenshots() {
+        viewModelScope.launch { refreshScreenshots() }
+    }
+
+    /** Build manage-list rows for the open video only (used by「截图预览」). */
+    suspend fun currentVideoManagedScreenshots(): List<ManagedScreenshot> {
+        refreshScreenshots()
+        val bundle = screenshotBundle() ?: return emptyList()
+        val media = Uri.parse(mediaUriString)
+        return sortedScreenshots(_state.value.screenshots).map { shot ->
+            val imageName = shot.image.ifBlank { "${shot.id}.png" }
+            ManagedScreenshot(
+                shot = shot,
+                treeUri = bundle.first,
+                bundleUri = bundle.second,
+                mediaUri = media,
+                mediaName = resolvedMediaName,
+                relativePath = managedRelativePath("", resolvedMediaName, imageName),
+                relativeDir = "",
+                createdAt = shot.createdAt.takeIf { it > 0L } ?: shot.updatedAt,
+                updatedAt = shot.updatedAt.takeIf { it > 0L } ?: shot.createdAt,
+            )
         }
     }
 

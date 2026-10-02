@@ -3,6 +3,7 @@ package com.jianqiaofan.subtitleplayer.ui
 import androidx.activity.ComponentActivity
 import android.app.Activity
 import android.app.Application
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -31,6 +32,8 @@ import com.jianqiaofan.subtitleplayer.ui.player.PlayerViewModel
 import com.jianqiaofan.subtitleplayer.ui.player.SleepShutdownViewModel
 import com.jianqiaofan.subtitleplayer.ui.player.SleepWarningDialog
 import com.jianqiaofan.subtitleplayer.ui.theme.WindowBackground
+import com.jianqiaofan.subtitleplayer.ui.update.AppUpdateHost
+import com.jianqiaofan.subtitleplayer.ui.update.AppUpdateViewModel
 
 object Routes {
     const val Library = "library"
@@ -60,13 +63,15 @@ fun SubtitlePlayerApp() {
 
     val activity = LocalContext.current as ComponentActivity
     val sleepShutdown: SleepShutdownViewModel = viewModel(viewModelStoreOwner = activity)
+    val appUpdate: AppUpdateViewModel = viewModel(viewModelStoreOwner = activity)
     val sleepState by sleepShutdown.state.collectAsStateWithLifecycle()
     LaunchedEffect(sleepState.exitNow) {
         if (sleepState.exitNow) activity.finish()
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = WindowBackground) {
-        NavHost(navController = navController, startDestination = Routes.Library) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Surface(modifier = Modifier.fillMaxSize(), color = WindowBackground) {
+            NavHost(navController = navController, startDestination = Routes.Library) {
             composable(Routes.Library) {
                 val fromPlayer = navController.previousBackStackEntry?.destination?.route == Routes.Player
                 val activity = LocalContext.current as? Activity
@@ -191,12 +196,14 @@ fun SubtitlePlayerApp() {
                 }
             }
         }
-    }
-    if (sleepState.warning && !sleepState.exitNow) {
-        SleepWarningDialog(
-            remainSec = sleepState.warningRemainSec,
-            onSnooze = sleepShutdown::snoozeMinutes,
-            onCancelTimer = sleepShutdown::cancel,
-        )
+        }
+        AppUpdateHost(viewModel = appUpdate)
+        if (sleepState.warning && !sleepState.exitNow) {
+            SleepWarningDialog(
+                remainSec = sleepState.warningRemainSec,
+                onSnooze = sleepShutdown::snoozeMinutes,
+                onCancelTimer = sleepShutdown::cancel,
+            )
+        }
     }
 }

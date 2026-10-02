@@ -61,6 +61,17 @@ class ScreenshotTest {
         val plain = parseScreenshotDocument(noBox)!!.screenshots.single().notes.single()
         assertNull(plain.box)
         assertFalse(encodeScreenshotDocument(parseScreenshotDocument(noBox)!!).contains("\"box\""))
+        // Missing align/font in JSON → left + smaller default size.
+        val bareBox = sample.replace(
+            Regex(""",\s*"font": 0\.06,\s*"color": "#1A1A1A",\s*"align": "center""""),
+            """, "color": "#1A1A1A"""",
+        )
+        val defaults = parseScreenshotDocument(bareBox)!!.screenshots.single().notes.single().box!!
+        assertEquals("left", defaults.align)
+        assertEquals("top", defaults.valign)
+        assertEquals(NOTE_DEFAULT_FONT, defaults.font, 0.0001)
+        assertEquals("", defaults.titleBackground)
+        assertFalse(defaults.titleBold)
     }
 
     @Test
@@ -69,6 +80,7 @@ class ScreenshotTest {
         assertEquals(FONT_MAX, normalizeFont(200.0), 0.0001)
         assertEquals(FONT_MIN, normalizeFont(5.0), 0.0001)
         assertEquals(0.06, normalizeFont(0.06), 0.0001)
+        assertEquals(NOTE_DEFAULT_FONT, normalizeFont(NOTE_DEFAULT_FONT), 0.0001)
         assertEquals(FONT_MAX, normalizeFont(1.0), 0.0001)
     }
 
@@ -77,7 +89,10 @@ class ScreenshotTest {
         assertEquals(OPACITY_MIN, normalizeOpacity(0.01), 0.0)
         assertEquals(1.0, normalizeOpacity(2.0), 0.0)
         assertEquals("left", normalizeAlign("LEFT"))
-        assertEquals("center", normalizeAlign("justify"))
+        assertEquals("left", normalizeAlign("justify"))
+        assertEquals("left", normalizeAlign(null))
+        assertEquals("top", normalizeVAlign(null))
+        assertEquals(NOTE_DEFAULT_FONT, normalizeFont(NOTE_DEFAULT_FONT), 0.0001)
         assertEquals("#1A1A1A", normalizeColor("#1a1a1a", NOTE_COLOR_WHITE))
         assertEquals(NOTE_COLOR_WHITE, normalizeColor("red", NOTE_COLOR_WHITE))
     }
@@ -209,6 +224,29 @@ class ScreenshotTest {
         assertEquals(0.25, defaultNoteBox().x, 0.0001)
         assertEquals(0.5, defaultNoteBox().width, 0.0001)
         assertTrue(defaultNoteBox(0, 2).x < defaultNoteBox(1, 2).x)
+        val spring = NOTE_STYLE_PRESETS.first { it.id == "spring" }
+        val before = NoteBox(0.1, 0.2, 0.3, 0.25, font = 0.08, align = "right", valign = "bottom")
+        val styled = applyNoteStylePreset(before, spring)
+        assertEquals(0.1, styled.x, 1e-6)
+        assertEquals(0.2, styled.y, 1e-6)
+        assertEquals(spring.background.lowercase(), styled.background.lowercase())
+        assertEquals(spring.color.lowercase(), styled.color.lowercase())
+        assertEquals(spring.opacity, styled.opacity, 1e-6)
+        // Preset must not touch font or alignment.
+        assertEquals(0.08, styled.font, 1e-6)
+        assertEquals("right", styled.align)
+        assertEquals("bottom", styled.valign)
+        assertEquals(spring.titleBackground.lowercase(), styled.titleBackground.lowercase())
+        assertTrue(styled.titleBold)
+        assertTrue(styled.titleItalic)
+        assertEquals("left", defaultNoteBox().align)
+        assertEquals("top", defaultNoteBox().valign)
+        assertEquals(NOTE_DEFAULT_FONT, defaultNoteBox().font, 1e-6)
+        assertEquals("春日清新", spring.title)
+        assertEquals("夏日火热", NOTE_STYLE_PRESETS[1].title)
+        assertEquals("秋天朴素", NOTE_STYLE_PRESETS[2].title)
+        assertEquals("冬日静谧", NOTE_STYLE_PRESETS[3].title)
+        assertTrue(NOTE_STYLE_PRESETS.all { it.titleBackground.isNotBlank() && it.titleBold && it.titleItalic })
     }
 
     @Test

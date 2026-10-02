@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,12 +35,16 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -102,6 +107,10 @@ private val SideBySideMinWidth = 600.dp
 /** Fixed notes pane height in stacked (narrow) layout so extra dialog height goes to cues. */
 private val StackedNotePaneHeight = 200.dp
 
+private data class NoteDraftSnapshot(val text: String, val editingNoteId: String?)
+
+private const val NOTE_DRAFT_HISTORY_LIMIT = 40
+
 /** Semi-transparent create/edit panel over the paused frame. */
 @Composable
 fun ScreenshotEditDialog(
@@ -116,6 +125,9 @@ fun ScreenshotEditDialog(
     var notes by remember(shot.id) { mutableStateOf(shot.notes) }
     var noteText by remember(shot.id) { mutableStateOf("") }
     var editingNoteId by remember(shot.id) { mutableStateOf<String?>(null) }
+    var noteUndoStack by remember(shot.id) { mutableStateOf(listOf<NoteDraftSnapshot>()) }
+    var noteRedoStack by remember(shot.id) { mutableStateOf(listOf<NoteDraftSnapshot>()) }
+    var noteTypingBatch by remember(shot.id) { mutableStateOf(false) }
     var checked by remember(shot.id) { mutableStateOf(setOf<Int>()) }
     var showTagPicker by remember { mutableStateOf(false) }
     var tagPickerForSave by remember { mutableStateOf(false) }
@@ -132,6 +144,57 @@ fun ScreenshotEditDialog(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val knownTags = remember(customTagNames) { PRESET_TAGS + customTagNames }
+
+    fun currentNoteDraft() = NoteDraftSnapshot(noteText, editingNoteId)
+
+    fun pushNoteHistory() {
+        val snap = currentNoteDraft()
+        if (noteUndoStack.lastOrNull() == snap) return
+        noteUndoStack = (noteUndoStack + snap).takeLast(NOTE_DRAFT_HISTORY_LIMIT)
+        noteRedoStack = emptyList()
+        noteTypingBatch = false
+    }
+
+    fun applyNoteDraft(snap: NoteDraftSnapshot) {
+        noteText = snap.text
+        editingNoteId = snap.editingNoteId
+    }
+
+    fun undoNoteDraft() {
+        val prev = noteUndoStack.lastOrNull() ?: return
+        noteRedoStack = noteRedoStack + currentNoteDraft()
+        noteUndoStack = noteUndoStack.dropLast(1)
+        noteTypingBatch = false
+        applyNoteDraft(prev)
+    }
+
+    fun redoNoteDraft() {
+        val next = noteRedoStack.lastOrNull() ?: return
+        noteUndoStack = (noteUndoStack + currentNoteDraft()).takeLast(NOTE_DRAFT_HISTORY_LIMIT)
+        noteRedoStack = noteRedoStack.dropLast(1)
+        noteTypingBatch = false
+        applyNoteDraft(next)
+    }
+
+    fun setNoteDraft(text: String, editingId: String?, record: Boolean = true) {
+        if (text == noteText && editingId == editingNoteId) return
+        if (record) pushNoteHistory()
+        noteText = text
+        editingNoteId = editingId
+    }
+
+    fun changeNoteText(next: String, fromTyping: Boolean) {
+        if (next == noteText) return
+        if (fromTyping) {
+            if (!noteTypingBatch) {
+                pushNoteHistory()
+                noteTypingBatch = true
+            }
+        } else {
+            pushNoteHistory()
+        }
+        noteText = next
+    }
 
     LaunchedEffect(Unit) {
         val (kindWire, opacity) = prefs.screenshotEditChromeOnce()
@@ -166,9 +229,8 @@ fun ScreenshotEditDialog(
         scrollToCenter()
     }
 
-    fun clearNoteEditor() {
-        editingNoteId = null
-        noteText = ""
+    fun clearNoteEditor(record: Boolean = true) {
+        setNoteDraft("", null, record = record)
     }
 
     fun addNote() {
@@ -183,7 +245,7 @@ fun ScreenshotEditDialog(
             box = null,
         )
         notes = notes + note
-        clearNoteEditor()
+        clearNoteEditor(record = true)
     }
 
     fun updateNote() {
@@ -208,15 +270,14 @@ fun ScreenshotEditDialog(
             box = null,
         )
         notes = notes + note
-        editingNoteId = note.id
-        noteText = text
+        setNoteDraft(text, note.id, record = true)
     }
 
     fun insertCheckedCues() {
         val selected = window.cues.filter { it.index in checked }
         if (selected.isEmpty()) return
         val joined = joinCueTextsForNote(selected.map { it.text })
-        noteText = appendJoinedCueTexts(noteText, joined)
+        changeNoteText(appendJoinedCueTexts(noteText, joined), fromTyping = false)
         checked = emptySet()
     }
 
@@ -403,20 +464,20 @@ fun ScreenshotEditDialog(
                                 ) {
                                     ThemedButton(
                                         chrome = chrome,
+                                        enabled = window.centerInWindow != null,
+                                        onClick = { scrollToCenter() },
+                                    ) { Text("回到中心字幕", color = chrome.text, fontSize = 13.sp) }
+                                    ThemedButton(
+                                        chrome = chrome,
                                         enabled = checked.isNotEmpty(),
                                         onClick = { insertCheckedCues() },
                                     ) {
                                         Text(
-                                            if (sideBySide) "传入右侧输入框内" else "传入下方输入框内",
+                                            if (sideBySide) "传入右侧笔记框中" else "传入下方笔记框中",
                                             color = chrome.text,
                                             fontSize = 13.sp,
                                         )
                                     }
-                                    ThemedButton(
-                                        chrome = chrome,
-                                        enabled = window.centerInWindow != null,
-                                        onClick = { scrollToCenter() },
-                                    ) { Text("回到中心", color = chrome.text, fontSize = 13.sp) }
                                 }
                             }
                         }
@@ -428,7 +489,7 @@ fun ScreenshotEditDialog(
                                 Text("笔记内容", color = chrome.text, fontSize = 14.sp)
                                 DarkField(
                                     value = noteText,
-                                    onValueChange = { noteText = it },
+                                    onValueChange = { changeNoteText(it, fromTyping = true) },
                                     singleLine = false,
                                     placeholder = "笔记内容",
                                     chrome = chrome,
@@ -438,27 +499,71 @@ fun ScreenshotEditDialog(
                                 )
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    if (editingNoteId == null) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
                                         ThemedButton(
                                             chrome = chrome,
-                                            enabled = noteText.isNotBlank(),
-                                            onClick = { addNote() },
-                                        ) { Text("添加笔记", color = chrome.text, fontSize = 13.sp) }
-                                    } else {
+                                            enabled = noteText.isNotEmpty() || editingNoteId != null,
+                                            onClick = { clearNoteEditor(record = true) },
+                                        ) { Text("清空", color = chrome.text, fontSize = 13.sp) }
                                         ThemedButton(
                                             chrome = chrome,
-                                            enabled = noteText.isNotBlank(),
-                                            onClick = { updateNote() },
-                                        ) { Text("更新笔记", color = chrome.text, fontSize = 13.sp) }
-                                        Spacer(Modifier.width(6.dp))
+                                            enabled = noteUndoStack.isNotEmpty(),
+                                            onClick = { undoNoteDraft() },
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.Undo,
+                                                contentDescription = "撤销",
+                                                tint = if (noteUndoStack.isNotEmpty()) {
+                                                    chrome.text
+                                                } else {
+                                                    chrome.muted
+                                                },
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
                                         ThemedButton(
                                             chrome = chrome,
-                                            enabled = noteText.isNotBlank(),
-                                            onClick = { saveAsNewNote() },
-                                        ) { Text("保存为新笔记", color = chrome.text, fontSize = 13.sp) }
+                                            enabled = noteRedoStack.isNotEmpty(),
+                                            onClick = { redoNoteDraft() },
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.Redo,
+                                                contentDescription = "反撤销",
+                                                tint = if (noteRedoStack.isNotEmpty()) {
+                                                    chrome.text
+                                                } else {
+                                                    chrome.muted
+                                                },
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                        }
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (editingNoteId == null) {
+                                            ThemedButton(
+                                                chrome = chrome,
+                                                enabled = noteText.isNotBlank(),
+                                                onClick = { addNote() },
+                                            ) { Text("添加笔记", color = chrome.text, fontSize = 13.sp) }
+                                        } else {
+                                            ThemedButton(
+                                                chrome = chrome,
+                                                enabled = noteText.isNotBlank(),
+                                                onClick = { updateNote() },
+                                            ) { Text("更新笔记", color = chrome.text, fontSize = 13.sp) }
+                                            Spacer(Modifier.width(6.dp))
+                                            ThemedButton(
+                                                chrome = chrome,
+                                                enabled = noteText.isNotBlank(),
+                                                onClick = { saveAsNewNote() },
+                                            ) { Text("保存为新笔记", color = chrome.text, fontSize = 13.sp) }
+                                        }
                                     }
                                 }
                             }
@@ -501,55 +606,61 @@ fun ScreenshotEditDialog(
 
                     val noteScroll = rememberScrollState()
                     val notesOverflow = noteScroll.maxValue > 0
-                    if (notes.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(noteScroll),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                notes.forEach { note ->
-                                    NoteChip(
-                                        note = note,
-                                        selected = note.id == editingNoteId,
-                                        onClick = {
-                                            if (editingNoteId == note.id) {
-                                                clearNoteEditor()
-                                            } else {
-                                                editingNoteId = note.id
-                                                noteText = note.text
-                                            }
-                                        },
-                                        onDelete = { deleteNoteId = note.id },
-                                    )
-                                }
-                            }
-                            if (notesOverflow) {
-                                Text("按住标签左右拖动", color = chrome.muted, fontSize = 11.sp)
-                            }
-                        }
-                    }
-
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        ThemedButton(chrome = chrome, onClick = { showThemePicker = true }) {
-                            Text("主题", color = chrome.text, fontSize = 13.sp)
+                        if (notes.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(noteScroll),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    notes.forEach { note ->
+                                        NoteChip(
+                                            note = note,
+                                            selected = note.id == editingNoteId,
+                                            onClick = {
+                                                if (editingNoteId == note.id) {
+                                                    clearNoteEditor(record = true)
+                                                } else {
+                                                    setNoteDraft(note.text, note.id, record = true)
+                                                }
+                                            },
+                                            onDelete = { deleteNoteId = note.id },
+                                        )
+                                    }
+                                }
+                                if (notesOverflow) {
+                                    Text("按住标签左右拖动", color = chrome.muted, fontSize = 11.sp)
+                                }
+                            }
+                        } else {
+                            Spacer(Modifier.weight(1f))
                         }
-                        Spacer(Modifier.width(8.dp))
-                        ThemedButton(chrome = chrome, onClick = onCancel) {
-                            Text("取消", color = chrome.text, fontSize = 13.sp)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        ThemedButton(chrome = chrome, enabled = !capturing, onClick = { trySave() }) {
-                            Text(
-                                if (capturing) "截取中…" else "保存",
-                                color = chrome.text,
-                                fontSize = 13.sp,
-                            )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            ThemedButton(chrome = chrome, onClick = { showThemePicker = true }) {
+                                Text("主题", color = chrome.text, fontSize = 13.sp)
+                            }
+                            ThemedButton(chrome = chrome, onClick = onCancel) {
+                                Text("取消", color = chrome.text, fontSize = 13.sp)
+                            }
+                            ThemedButton(chrome = chrome, enabled = !capturing, onClick = { trySave() }) {
+                                Text(
+                                    if (capturing) "截取中…" else "保存",
+                                    color = chrome.text,
+                                    fontSize = 13.sp,
+                                )
+                            }
                         }
                     }
                 }

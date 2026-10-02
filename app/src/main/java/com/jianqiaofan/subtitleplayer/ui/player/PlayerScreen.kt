@@ -216,6 +216,7 @@ fun PlayerScreen(
     var listContextMenuOpen by remember { mutableStateOf(false) }
     var editSession by remember { mutableStateOf<ScreenshotEditSession?>(null) }
     var showScreenshotManage by remember { mutableStateOf(false) }
+    var showCurrentVideoManage by remember { mutableStateOf(false) }
     var viewerSession by remember { mutableStateOf<ScreenshotViewerSession?>(null) }
     var viewerEditItem by remember { mutableStateOf<ViewerItem?>(null) }
     var selectionMode by remember { mutableStateOf(false) }
@@ -244,14 +245,16 @@ fun PlayerScreen(
         viewerSession = ScreenshotViewerSession(
             items = ordered.map { ViewerItem(it) },
             index = index,
-            returnToManage = false,
         )
     }
 
     fun closeViewer() {
-        val returnManage = viewerSession?.returnToManage == true
         viewerSession = null
-        if (returnManage) showScreenshotManage = true
+    }
+
+    fun onViewerSessionEnd(dirty: List<ViewerItem>) {
+        viewModel.commitViewerEdits(dirty)
+        viewModel.flushViewerCloudSync()
     }
 
     DisposableEffect(lifecycleOwner, viewModel) {
@@ -499,6 +502,10 @@ fun PlayerScreen(
                     }
                     DropdownMenu(expanded = toolsMenu, onDismissRequest = { toolsMenu = false }) {
                         DropdownMenuItem(
+                            text = { Text("截图管理") },
+                            onClick = { toolsMenu = false; showScreenshotManage = true },
+                        )
+                        DropdownMenuItem(
                             text = { Text("学习记录") },
                             onClick = { toolsMenu = false; viewModel.showStudyLog() },
                         )
@@ -529,9 +536,8 @@ fun PlayerScreen(
                         contentDescription = if (devicePortrait) "切换横屏" else "切换竖屏",
                     )
                 }
-                TextButton(onClick = { showScreenshotManage = true }) { Text("截图管理") }
                 TextButton(
-                    onClick = { openCurrentVideoViewer() },
+                    onClick = { showCurrentVideoManage = true },
                     enabled = state.screenshots.isNotEmpty(),
                 ) { Text("截图预览") }
                 IconButton(onClick = { showSettings = true }) {
@@ -779,7 +785,7 @@ fun PlayerScreen(
             customTagNames = state.customTagNames,
             capturing = false,
             onSave = { updated ->
-                viewModel.saveViewerShot(viewerEdit, updated)
+                // Keep in viewer session cache; flush on look-mode close.
                 viewerSession = viewerSession?.let { session ->
                     session.copy(
                         items = session.items.map { item ->
@@ -806,39 +812,34 @@ fun PlayerScreen(
             items = viewer.items,
             initialIndex = viewer.index,
             loadImage = { item -> viewModel.viewerImageBytes(item) },
-            onSaveShot = { item, updated ->
-                viewModel.saveViewerShot(item, updated)
-                viewerSession = viewerSession?.let { session ->
-                    session.copy(
-                        items = session.items.map { entry ->
-                            if (entry.shot.id == updated.id) {
-                                entry.copy(
-                                    shot = updated,
-                                    managed = entry.managed?.copy(shot = updated),
-                                )
-                            } else {
-                                entry
-                            }
-                        },
-                    )
-                }
-            },
             onEditShot = { item -> viewerEditItem = item },
-            onClose = { closeViewer() },
+            onDismissRequest = { closeViewer() },
+            onSessionEnd = { dirty -> onViewerSessionEnd(dirty) },
         )
     }
 
-    if (showScreenshotManage && viewerSession == null) {
-        ScreenshotManageDialog(
+    if (showScreenshotManage) {
+        ScreenshotManageFlow(
+            visible = true,
             onDismiss = { showScreenshotManage = false },
-            onView = { managedItems, index ->
-                showScreenshotManage = false
-                viewerSession = ScreenshotViewerSession(
-                    items = managedItems.map { ViewerItem(shot = it.shot, managed = it) },
-                    index = index,
-                    returnToManage = true,
-                )
-            },
+            currentMediaUri = mediaUri,
+            currentCues = state.cues,
+            customTagNames = state.customTagNames,
+            onCurrentMediaShotChanged = { viewModel.reloadScreenshots() },
+        )
+    }
+
+    if (showCurrentVideoManage) {
+        ScreenshotManageFlow(
+            visible = true,
+            onDismiss = { showCurrentVideoManage = false },
+            currentMediaUri = mediaUri,
+            currentCues = state.cues,
+            customTagNames = state.customTagNames,
+            onCurrentMediaShotChanged = { viewModel.reloadScreenshots() },
+            currentVideoOnly = true,
+            currentVideoLabel = state.mediaName,
+            loadCurrentVideoItems = { viewModel.currentVideoManagedScreenshots() },
         )
     }
 
@@ -1411,7 +1412,6 @@ private sealed class ScreenshotEditSession {
 private data class ScreenshotViewerSession(
     val items: List<ViewerItem>,
     val index: Int,
-    val returnToManage: Boolean,
 )
 
 @Composable

@@ -247,6 +247,17 @@ class AppPreferences(private val context: Context) {
         }
     }
 
+    suspend fun lastPromptedUpdateVersionCodeOnce(): Int =
+        context.dataStore.data.first()[KEY_UPDATE_PROMPTED_VERSION] ?: 0
+
+    suspend fun rememberPromptedUpdateVersionCode(versionCode: Int) {
+        if (versionCode < 0) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[KEY_UPDATE_PROMPTED_VERSION] ?: 0
+            if (versionCode > current) prefs[KEY_UPDATE_PROMPTED_VERSION] = versionCode
+        }
+    }
+
     val screenshotManageRecents: Flow<List<RecentFolder>> =
         context.dataStore.data.map { prefs -> decodeFolders(prefs[KEY_SCREENSHOT_MANAGE_RECENTS].orEmpty()) }
 
@@ -264,6 +275,22 @@ class AppPreferences(private val context: Context) {
             val existing = stored.filterNot { it.treeUri == treeUri }
             val next = listOf(RecentFolder(treeUri, displayName, now)) + existing
             prefs[KEY_SCREENSHOT_MANAGE_RECENTS] = encodeFolders(next.take(MANAGE_RECENT_MAX))
+        }
+    }
+
+    /** Local-only relative panel position (0…1 of image) for a screenshot on this device. */
+    suspend fun noteStylePanelPosOnce(shotId: String): Pair<Float, Float>? {
+        if (shotId.isBlank()) return null
+        val map = decodePanelPos(context.dataStore.data.first()[KEY_NOTE_STYLE_PANEL_POS].orEmpty())
+        return map[shotId]
+    }
+
+    suspend fun rememberNoteStylePanelPos(shotId: String, xRel: Float, yRel: Float) {
+        if (shotId.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val map = decodePanelPos(prefs[KEY_NOTE_STYLE_PANEL_POS].orEmpty()).toMutableMap()
+            map[shotId] = xRel.coerceIn(0f, 1f) to yRel.coerceIn(0f, 1f)
+            prefs[KEY_NOTE_STYLE_PANEL_POS] = encodePanelPos(map)
         }
     }
 
@@ -308,8 +335,10 @@ class AppPreferences(private val context: Context) {
         private const val MANAGE_RECENT_MAX = 15
         private val KEY_RECENTS = stringPreferencesKey("recent_folders")
         private val KEY_DISMISSED_TIPS = stringPreferencesKey("dismissed_tips")
+        private val KEY_UPDATE_PROMPTED_VERSION = intPreferencesKey("update_prompted_version_code")
         private val KEY_SCREENSHOT_MANAGE_FOLDER = stringPreferencesKey("screenshot_manage_folder")
         private val KEY_SCREENSHOT_MANAGE_RECENTS = stringPreferencesKey("screenshot_manage_recents")
+        private val KEY_NOTE_STYLE_PANEL_POS = stringPreferencesKey("note_style_panel_pos")
         private val KEY_RECENT_MEDIA = stringPreferencesKey("recent_media")
         private val KEY_BATCH_TAG_FILES = stringPreferencesKey("batch_tag_sync_files")
         private val KEY_BATCH_TAG_DIR = stringPreferencesKey("batch_tag_sync_video_dir")
@@ -377,5 +406,20 @@ class AppPreferences(private val context: Context) {
 
         private fun decodeTipIds(raw: String): List<String> =
             raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
+
+        private fun encodePanelPos(map: Map<String, Pair<Float, Float>>): String =
+            map.entries.joinToString("\n") { (id, pos) -> "$id\t${pos.first}\t${pos.second}" }
+
+        private fun decodePanelPos(raw: String): Map<String, Pair<Float, Float>> =
+            raw.lineSequence()
+                .filter { it.isNotBlank() }
+                .mapNotNull { line ->
+                    val parts = line.split('\t')
+                    if (parts.size < 3) return@mapNotNull null
+                    val x = parts[1].toFloatOrNull() ?: return@mapNotNull null
+                    val y = parts[2].toFloatOrNull() ?: return@mapNotNull null
+                    parts[0] to (x to y)
+                }
+                .toMap()
     }
 }

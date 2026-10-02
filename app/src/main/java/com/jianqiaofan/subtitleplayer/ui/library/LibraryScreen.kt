@@ -79,6 +79,7 @@ fun LibraryScreen(
     var remarkFolder by remember { mutableStateOf<RecentFolder?>(null) }
     var remarkText by remember { mutableStateOf("") }
     var deleteFolder by remember { mutableStateOf<RecentFolder?>(null) }
+    var showScreenshotManage by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
@@ -110,6 +111,7 @@ fun LibraryScreen(
                         Icon(Icons.Outlined.FolderOpen, contentDescription = null)
                         Text("选择文件夹", modifier = Modifier.padding(start = 6.dp))
                     }
+                    TextButton(onClick = { showScreenshotManage = true }) { Text("截图管理") }
                     TextButton(onClick = onOpenAccount) { Text("账号") }
                     var confirmExit by remember { mutableStateOf(false) }
                     TextButton(onClick = { confirmExit = true }) { Text("退出") }
@@ -282,6 +284,13 @@ fun LibraryScreen(
             dismissButton = {
                 TextButton(onClick = { deleteFolder = null }) { Text("取消") }
             },
+        )
+    }
+
+    if (showScreenshotManage) {
+        com.jianqiaofan.subtitleplayer.ui.player.ScreenshotManageFlow(
+            visible = true,
+            onDismiss = { showScreenshotManage = false },
         )
     }
 }
