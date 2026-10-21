@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -39,6 +40,7 @@ import com.jianqiaofan.subtitleplayer.domain.display.ImmersiveListSidePortrait
 import com.jianqiaofan.subtitleplayer.domain.display.OnScreenSubtitlePosition
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.domain.display.parseColorArgb
+import com.jianqiaofan.subtitleplayer.domain.subtitle.DeepSeekConfig
 import com.jianqiaofan.subtitleplayer.ui.theme.AccentPurple
 import com.jianqiaofan.subtitleplayer.ui.theme.OnDark
 import com.jianqiaofan.subtitleplayer.ui.theme.OnDarkMuted
@@ -55,17 +57,25 @@ fun OnScreenSubtitleSettingsDialog(
     immersiveAvailable: Boolean,
     immersiveUnavailableReason: String?,
     devicePortrait: Boolean,
+    deepSeek: DeepSeekConfig,
     onPreview: (PlayerDisplaySettings) -> Unit,
     onShowSubtitleList: (Boolean) -> Unit,
     onConfirm: (PlayerDisplaySettings) -> Unit,
+    onSaveDeepSeek: (DeepSeekConfig) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var draft by remember(saved) { mutableStateOf(saved) }
+    var deepSeekDraft by remember(deepSeek) { mutableStateOf(deepSeek) }
     var askSave by remember { mutableStateOf(false) }
     val listControlsEnabled = showSubtitleList
     val immersiveControlsEnabled = showSubtitleList && draft.immersiveList && immersiveAvailable
     val captionControlsEnabled = draft.onscreenEnabled
-    val dirty = draft != saved
+    val dirty = draft != saved || deepSeekDraft != deepSeek
+
+    fun confirm() {
+        onSaveDeepSeek(deepSeekDraft)
+        onConfirm(draft)
+    }
 
     fun closeWithoutAsking() {
         onPreview(saved)
@@ -275,9 +285,36 @@ fun OnScreenSubtitleSettingsDialog(
                     )
                 }
             }
+            Text("翻译", style = MaterialTheme.typography.titleMedium, color = OnDark)
+            OutlinedTextField(
+                value = deepSeekDraft.apiKey,
+                onValueChange = { deepSeekDraft = deepSeekDraft.copy(apiKey = it) },
+                label = { Text("DeepSeek API Key") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = deepSeekDraft.baseUrl,
+                onValueChange = { deepSeekDraft = deepSeekDraft.copy(baseUrl = it) },
+                label = { Text("接口地址") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = deepSeekDraft.model,
+                onValueChange = { deepSeekDraft = deepSeekDraft.copy(model = it) },
+                label = { Text("模型") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "画面上选了其它语言时，用这里的 DeepSeek 把译文写进当前字幕。没填密钥会显示「翻译：未配置 DeepSeek」。",
+                color = OnDarkMuted,
+                style = MaterialTheme.typography.bodySmall,
+            )
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = { closeWithoutAsking() }) { Text("取消") }
-                TextButton(onClick = { onConfirm(draft) }) { Text("确定") }
+                TextButton(onClick = { confirm() }) { Text("确定") }
             }
         }
     }
@@ -286,11 +323,11 @@ fun OnScreenSubtitleSettingsDialog(
         AlertDialog(
             onDismissRequest = { askSave = false },
             title = { Text("保存显示设置？") },
-            text = { Text("画面字幕和沉浸列表有改动。确认会记住这些设置；放弃则恢复打开前的样子。") },
+            text = { Text("画面字幕、沉浸列表或翻译设置有改动。确认会记住这些设置；放弃则恢复打开前的样子。") },
             confirmButton = {
                 TextButton(onClick = {
                     askSave = false
-                    onConfirm(draft)
+                    confirm()
                 }) { Text("确认修改") }
             },
             dismissButton = {

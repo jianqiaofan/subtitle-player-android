@@ -5,6 +5,7 @@ import com.jianqiaofan.subtitleplayer.domain.json.jsonNumber
 import com.jianqiaofan.subtitleplayer.domain.json.jsonString
 import com.jianqiaofan.subtitleplayer.domain.json.parseJson
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleOriginal
 import com.jianqiaofan.subtitleplayer.domain.model.isMediaFile
 import com.jianqiaofan.subtitleplayer.domain.model.isSubtitleFile
 import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
@@ -299,12 +300,12 @@ fun alignTags(cues: List<SubtitleCue>, entries: List<TagEntry>): TagAlignment {
         cues.indices.firstOrNull { i ->
             i !in used &&
                 startsWithinOneMillisecond(cues[i].start, entry.start) &&
-                textsAreClose(cues[i].text, entry.text)
+                textsAreClose(subtitleOriginal(cues[i].text), entry.text)
         }
     }
     pending = take { entry ->
         cues.indices.firstOrNull { i ->
-            i !in used && cues[i].index == entry.index && textsAreClose(cues[i].text, entry.text)
+            i !in used && cues[i].index == entry.index && textsAreClose(subtitleOriginal(cues[i].text), entry.text)
         }
     }
 
@@ -315,7 +316,7 @@ fun alignTags(cues: List<SubtitleCue>, entries: List<TagEntry>): TagAlignment {
             unmatched += entry
             continue
         }
-        val same = cues.indices.filter { stripWhitespace(cues[it].text) == norm }
+        val same = cues.indices.filter { stripWhitespace(subtitleOriginal(cues[it].text)) == norm }
         val hit = when {
             same.isEmpty() -> null
             same.size == 1 -> same[0].takeIf { it !in used }
@@ -338,7 +339,7 @@ fun alignTags(cues: List<SubtitleCue>, entries: List<TagEntry>): TagAlignment {
 }
 
 fun retargetAttachedEntry(entry: TagEntry, cue: SubtitleCue): TagEntry =
-    entry.copy(index = cue.index, start = cue.start, end = cue.end, text = cue.text)
+    entry.copy(index = cue.index, start = cue.start, end = cue.end, text = subtitleOriginal(cue.text))
 
 fun applyCueEdit(alignment: TagAlignment, cueIndex: Int, updated: SubtitleCue): TagAlignment {
     val entry = alignment.attached[cueIndex] ?: return alignment
@@ -360,6 +361,8 @@ data class TagEdit(
     val tags: List<String>,
     val note: String,
     val applyNote: Boolean,
+    /** Multiple cues keep their existing tags and gain the checked ones. */
+    val append: Boolean = false,
 )
 
 fun applyTagEdit(
@@ -369,11 +372,17 @@ fun applyTagEdit(
     at: String = tagNow(),
     newId: () -> String = { newTagId() },
 ): TagAlignment {
-    val tags = orderedTagNames(edit.tags)
+    val requested = orderedTagNames(edit.tags)
+    if (edit.append && requested.isEmpty() && !edit.applyNote) return alignment
     val attached = alignment.attached.toMutableMap()
     for (cueIndex in edit.cueIndices.distinct()) {
         val cue = cues.getOrNull(cueIndex) ?: continue
         val existing = attached[cueIndex]
+        val tags = if (edit.append) {
+            orderedTagNames(existing?.tags.orEmpty() + requested)
+        } else {
+            requested
+        }
         val note = if (edit.applyNote) edit.note else existing?.note.orEmpty()
         val noteAt = when {
             existing == null -> if (note.isBlank()) "" else at
@@ -389,7 +398,7 @@ fun applyTagEdit(
                 index = cue.index,
                 start = cue.start,
                 end = cue.end,
-                text = cue.text,
+                text = subtitleOriginal(cue.text),
                 tags = tags,
                 note = note,
                 tagOps = ops,
@@ -400,7 +409,7 @@ fun applyTagEdit(
                 index = cue.index,
                 start = cue.start,
                 end = cue.end,
-                text = cue.text,
+                text = subtitleOriginal(cue.text),
                 tags = tags,
                 note = note,
                 tagOps = ops,
@@ -474,7 +483,7 @@ fun attachUnmatchedToCue(
             index = cue.index,
             start = cue.start,
             end = cue.end,
-            text = cue.text,
+            text = subtitleOriginal(cue.text),
             tags = mergedTags,
             note = mergedNote,
             tagOps = ops,
@@ -489,7 +498,7 @@ fun attachUnmatchedToCue(
             index = cue.index,
             start = cue.start,
             end = cue.end,
-            text = cue.text,
+            text = subtitleOriginal(cue.text),
         )
     }
     return alignment.copy(

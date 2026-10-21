@@ -27,6 +27,9 @@ import com.jianqiaofan.subtitleplayer.ui.edit.EditSubtitleScreen
 import com.jianqiaofan.subtitleplayer.ui.library.FolderPickerScreen
 import com.jianqiaofan.subtitleplayer.ui.library.LibraryScreen
 import com.jianqiaofan.subtitleplayer.ui.library.MediaBrowserScreen
+import com.jianqiaofan.subtitleplayer.domain.subtitle.activeTranslationLanguage
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleLanguageByCode
+import com.jianqiaofan.subtitleplayer.domain.subtitle.SubtitleLanguage
 import com.jianqiaofan.subtitleplayer.ui.player.PlayerScreen
 import com.jianqiaofan.subtitleplayer.ui.player.PlayerViewModel
 import com.jianqiaofan.subtitleplayer.ui.player.SleepShutdownViewModel
@@ -184,9 +187,11 @@ fun SubtitlePlayerApp() {
                         if (state.cues.isNotEmpty()) navController.popBackStack()
                     }
                 } else {
+                    val source = subtitleLanguageByCode(state.sourceLanguageCode) ?: SubtitleLanguage.Zh
                     EditSubtitleScreen(
                         cue = cue,
                         writable = state.writable,
+                        translationTarget = activeTranslationLanguage(state.captionLanguageCode, source),
                         onSave = { start, end, text ->
                             viewModel.saveCue(index, start, end, text)
                             navController.popBackStack()

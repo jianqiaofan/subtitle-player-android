@@ -6,6 +6,7 @@ import com.jianqiaofan.subtitleplayer.domain.subtitle.NamedSubtitleFile
 import com.jianqiaofan.subtitleplayer.domain.subtitle.autoSelectTrack
 import com.jianqiaofan.subtitleplayer.domain.subtitle.cuesToFileContent
 import com.jianqiaofan.subtitleplayer.domain.subtitle.findCueIndexAtTime
+import com.jianqiaofan.subtitleplayer.domain.subtitle.previousCueIndex
 import com.jianqiaofan.subtitleplayer.domain.subtitle.findSubtitlesForMedia
 import com.jianqiaofan.subtitleplayer.domain.subtitle.formatCueListLine
 import com.jianqiaofan.subtitleplayer.domain.subtitle.loadSubtitleContent
@@ -102,6 +103,20 @@ class SubtitleIoTest {
         assertEquals(1, findCueIndexAtTime(cues, 5.0))
         assertEquals(2, findCueIndexAtTime(cues, 20.0))
         assertEquals(-1, findCueIndexAtTime(emptyList(), 1.0))
+    }
+
+    @Test
+    fun previousCueIndexStepsBackOneLine() {
+        val cues = listOf(
+            SubtitleCue(1, 0.0, 3.0, "a"),
+            SubtitleCue(2, 3.0, 6.0, "b"),
+            SubtitleCue(3, 6.0, 9.0, "c"),
+        )
+        assertEquals(1, previousCueIndex(cues, currentCueIndex = 2, positionSec = 7.0))
+        assertEquals(0, previousCueIndex(cues, currentCueIndex = 1, positionSec = 4.0))
+        assertEquals(0, previousCueIndex(cues, currentCueIndex = 0, positionSec = 1.0))
+        assertEquals(0, previousCueIndex(cues, currentCueIndex = -1, positionSec = 4.0))
+        assertEquals(null, previousCueIndex(emptyList(), currentCueIndex = 0, positionSec = 1.0))
     }
 
     @Test

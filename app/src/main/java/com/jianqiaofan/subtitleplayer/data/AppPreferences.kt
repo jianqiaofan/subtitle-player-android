@@ -18,6 +18,10 @@ import com.jianqiaofan.subtitleplayer.domain.display.OnScreenSubtitlePosition
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.domain.display.PreferredOrientation
 import com.jianqiaofan.subtitleplayer.domain.display.SubtitleListDensity
+import com.jianqiaofan.subtitleplayer.domain.subtitle.CAPTION_ORIGINAL
+import com.jianqiaofan.subtitleplayer.domain.subtitle.DEFAULT_DEEPSEEK_BASE_URL
+import com.jianqiaofan.subtitleplayer.domain.subtitle.DEFAULT_DEEPSEEK_MODEL
+import com.jianqiaofan.subtitleplayer.domain.subtitle.DeepSeekConfig
 import com.jianqiaofan.subtitleplayer.domain.model.RecentFolder
 import com.jianqiaofan.subtitleplayer.domain.model.RecentMedia
 import com.jianqiaofan.subtitleplayer.domain.playback.PlaybackRecord
@@ -35,6 +39,20 @@ class AppPreferences(private val context: Context) {
 
     val playbackSpeed: Flow<Float> =
         context.dataStore.data.map { prefs -> prefs[KEY_SPEED] ?: 1.0f }
+
+    val captionLanguage: Flow<String> =
+        context.dataStore.data.map { prefs ->
+            prefs[KEY_CAPTION_LANGUAGE]?.ifBlank { null } ?: CAPTION_ORIGINAL
+        }
+
+    val deepSeekConfig: Flow<DeepSeekConfig> =
+        context.dataStore.data.map { prefs ->
+            DeepSeekConfig(
+                apiKey = prefs[KEY_DEEPSEEK_KEY].orEmpty(),
+                baseUrl = prefs[KEY_DEEPSEEK_BASE]?.ifBlank { null } ?: DEFAULT_DEEPSEEK_BASE_URL,
+                model = prefs[KEY_DEEPSEEK_MODEL]?.ifBlank { null } ?: DEFAULT_DEEPSEEK_MODEL,
+            )
+        }
 
     val recentMedia: Flow<List<RecentMedia>> =
         context.dataStore.data.map { prefs -> decodeMedia(prefs[KEY_RECENT_MEDIA].orEmpty()) }
@@ -126,6 +144,18 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setPlaybackSpeed(speed: Float) {
         context.dataStore.edit { prefs -> prefs[KEY_SPEED] = speed }
+    }
+
+    suspend fun setCaptionLanguage(code: String) {
+        context.dataStore.edit { prefs -> prefs[KEY_CAPTION_LANGUAGE] = code }
+    }
+
+    suspend fun saveDeepSeek(config: DeepSeekConfig) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_DEEPSEEK_KEY] = config.apiKey.trim()
+            prefs[KEY_DEEPSEEK_BASE] = config.baseUrl.trim().ifBlank { DEFAULT_DEEPSEEK_BASE_URL }
+            prefs[KEY_DEEPSEEK_MODEL] = config.model.trim().ifBlank { DEFAULT_DEEPSEEK_MODEL }
+        }
     }
 
     suspend fun saveDisplaySettings(settings: PlayerDisplaySettings) {
@@ -346,6 +376,10 @@ class AppPreferences(private val context: Context) {
         private val KEY_TAG_EXTRACT_DEST = stringPreferencesKey("tag_extract_dest")
         private val KEY_CURRENT_TREE = stringPreferencesKey("current_tree")
         private val KEY_SPEED = floatPreferencesKey("playback_speed")
+        private val KEY_CAPTION_LANGUAGE = stringPreferencesKey("caption_language")
+        private val KEY_DEEPSEEK_KEY = stringPreferencesKey("deepseek_api_key")
+        private val KEY_DEEPSEEK_BASE = stringPreferencesKey("deepseek_base_url")
+        private val KEY_DEEPSEEK_MODEL = stringPreferencesKey("deepseek_model")
         private val KEY_POSITIONS = stringPreferencesKey("positions")
 
         private val KEY_ONSCREEN_ENABLED = booleanPreferencesKey("onscreen_subtitle_enabled")

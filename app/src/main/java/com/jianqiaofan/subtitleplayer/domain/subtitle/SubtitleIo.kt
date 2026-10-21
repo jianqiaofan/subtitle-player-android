@@ -44,7 +44,7 @@ fun formatCueListHeader(cue: SubtitleCue): String =
     "${cue.index}. [${formatClock(cue.start)} → ${formatClock(cue.end)}]"
 
 fun formatCueListLine(cue: SubtitleCue): String {
-    val text = cue.text.replace("\n", " / ")
+    val text = subtitleOriginal(cue.text).replace("\n", " / ")
     return "${formatCueListHeader(cue)} $text"
 }
 
@@ -57,6 +57,20 @@ fun findCueIndexAtTime(cues: List<SubtitleCue>, seconds: Double): Int {
         if (cue.start > seconds) return (index - 1).coerceAtLeast(0)
     }
     return cues.lastIndex
+}
+
+/** Index to seek for a double-tap "previous subtitle" gesture. First cue stays at 0. */
+fun previousCueIndex(
+    cues: List<SubtitleCue>,
+    currentCueIndex: Int,
+    positionSec: Double,
+): Int? {
+    if (cues.isEmpty()) return null
+    val current = when {
+        currentCueIndex in cues.indices -> currentCueIndex
+        else -> findCueIndexAtTime(cues, positionSec).takeIf { it >= 0 } ?: return null
+    }
+    return (current - 1).coerceAtLeast(0)
 }
 
 fun parseTimestamp(value: String): Double = tryParseTimestamp(value) ?: 0.0

@@ -28,4 +28,58 @@ class PlaybackGestureTest {
         assertEquals(15, volumeIndexForLevel(1f, 15))
         assertEquals(70, levelPercent(0.7f))
     }
+
+    @Test
+    fun bilibiliSeekUsesVerticalZonesAndHorizontalDirection() {
+        assertEquals(ProgressSeekMode.Slow, progressSeekModeForStartY(10f, 300f))
+        assertEquals(ProgressSeekMode.Medium, progressSeekModeForStartY(150f, 300f))
+        assertEquals(ProgressSeekMode.Fast, progressSeekModeForStartY(290f, 300f))
+        assertEquals(22.5f, secondsPerWidthForSeekMode(ProgressSeekMode.Slow), 0.001f)
+        assertEquals(90f, secondsPerWidthForSeekMode(ProgressSeekMode.Medium), 0.001f)
+        assertEquals(450f, secondsPerWidthForSeekMode(ProgressSeekMode.Fast), 0.001f)
+
+        assertTrue(horizontalDragExceededSlop(30f, 10f, 16f))
+        assertFalse(horizontalDragExceededSlop(10f, 30f, 16f))
+
+        // Full-width right swipe in medium zone ≈ +90s.
+        assertEquals(
+            90_000L,
+            seekTargetMs(
+                anchorMs = 0L,
+                totalDx = 1000f,
+                widthPx = 1000f,
+                durationMs = 600_000L,
+                mode = ProgressSeekMode.Medium,
+            ),
+        )
+        // Left swipe seeks backward; slow zone is finer.
+        assertEquals(
+            60_000L - 11_250L,
+            seekTargetMs(
+                anchorMs = 60_000L,
+                totalDx = -500f,
+                widthPx = 1000f,
+                durationMs = 600_000L,
+                mode = ProgressSeekMode.Slow,
+            ),
+        )
+        assertEquals(
+            0L,
+            seekTargetMs(
+                anchorMs = 5_000L,
+                totalDx = -1000f,
+                widthPx = 1000f,
+                durationMs = 60_000L,
+                mode = ProgressSeekMode.Fast,
+            ),
+        )
+        assertEquals(
+            "01:30 / 10:00  (+30秒)",
+            formatSeekHud(90_000L, 600_000L, 60_000L),
+        )
+        assertEquals(
+            "00:50 / 10:00  (-10秒)",
+            formatSeekHud(50_000L, 600_000L, 60_000L),
+        )
+    }
 }

@@ -69,6 +69,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -76,6 +77,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
@@ -109,7 +111,13 @@ import com.jianqiaofan.subtitleplayer.domain.display.immersiveUnavailableReason
 import com.jianqiaofan.subtitleplayer.domain.display.isImmersiveListAvailable
 import com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings
 import com.jianqiaofan.subtitleplayer.domain.subtitle.PLAYBACK_SPEEDS
+import com.jianqiaofan.subtitleplayer.domain.subtitle.activeTranslationLanguage
+import com.jianqiaofan.subtitleplayer.domain.subtitle.captionOptions
+import com.jianqiaofan.subtitleplayer.domain.subtitle.captionSelectionLabel
 import com.jianqiaofan.subtitleplayer.domain.subtitle.formatClock
+import com.jianqiaofan.subtitleplayer.domain.subtitle.onScreenCaption
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleLanguageByCode
+import com.jianqiaofan.subtitleplayer.domain.subtitle.SubtitleLanguage
 import com.jianqiaofan.subtitleplayer.ui.ApplyPreferredOrientation
 import com.jianqiaofan.subtitleplayer.ui.theme.AccentPurple
 import com.jianqiaofan.subtitleplayer.ui.theme.OnDarkMuted
@@ -117,8 +125,10 @@ import com.jianqiaofan.subtitleplayer.ui.theme.SurfacePanel
 import com.jianqiaofan.subtitleplayer.ui.theme.VideoBlack
 import com.jianqiaofan.subtitleplayer.ui.theme.WindowBackground
 import com.jianqiaofan.subtitleplayer.ui.toggledFrom
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 private const val SubtitleFollowResumeMs = 2_000L
 
@@ -339,7 +349,11 @@ fun PlayerScreen(
         listFraction = effectiveDisplay.immersiveListSizePercent / 100f,
     )
 
-    val onscreenText = state.cues.getOrNull(state.currentCueIndex)?.text
+    val sourceLanguage = subtitleLanguageByCode(state.sourceLanguageCode) ?: SubtitleLanguage.Zh
+    val captionChoices = captionOptions(sourceLanguage)
+    val onscreenText = state.cues.getOrNull(state.currentCueIndex)?.text?.let { raw ->
+        onScreenCaption(raw, activeTranslationLanguage(state.captionLanguageCode, sourceLanguage))
+    }
 
     val listContent: @Composable (Color, Boolean) -> Unit = { panelBg, showHeader ->
         SubtitleListPane(
@@ -540,9 +554,7 @@ fun PlayerScreen(
                     onClick = { showCurrentVideoManage = true },
                     enabled = state.screenshots.isNotEmpty(),
                 ) { Text("截图预览") }
-                IconButton(onClick = { showSettings = true }) {
-                    Icon(Icons.Filled.Subtitles, contentDescription = "画面字幕")
-                }
+                TextButton(onClick = { showSettings = true }) { Text("字幕设置") }
                 TextButton(onClick = { subtitleMenu = true }) {
                     Text(
                         when {
@@ -606,6 +618,12 @@ fun PlayerScreen(
                     onSpeed = viewModel::setSpeed,
                     onCountdown = { showCountdown = true },
                     onSleep = { showSleep = true },
+                    onscreenEnabled = effectiveDisplay.onscreenEnabled,
+                    onToggleOnScreen = viewModel::toggleOnScreenSubtitles,
+                    captionLabel = captionSelectionLabel(state.captionLanguageCode, sourceLanguage),
+                    captionChoices = captionChoices.map { it.code to it.label },
+                    onCaption = viewModel::setCaptionLanguage,
+                    translationStatus = state.translationStatus,
                 )
             }
         },
@@ -620,7 +638,11 @@ fun PlayerScreen(
                     onscreenText = onscreenText,
                     displaySettings = effectiveDisplay,
                     horizontalSpan = com.jianqiaofan.subtitleplayer.domain.display.OnScreenHorizontalSpan.Full,
+                    positionMs = state.positionMs,
+                    durationMs = state.durationMs,
                     onTogglePlay = viewModel::togglePlayPause,
+                    onDoubleTap = viewModel::seekToPreviousCue,
+                    onSeek = { viewModel.seekTo(it, fromUser = true) },
                     onPlaybackAudible = viewModel::setPlaybackAudible,
                     onRotate = {
                         val next = display.preferredOrientation.toggledFrom(devicePortrait)
@@ -654,7 +676,11 @@ fun PlayerScreen(
                             onscreenText = onscreenText,
                             displaySettings = effectiveDisplay,
                             horizontalSpan = captionSpan,
+                            positionMs = state.positionMs,
+                            durationMs = state.durationMs,
                             onTogglePlay = viewModel::togglePlayPause,
+                            onDoubleTap = viewModel::seekToPreviousCue,
+                            onSeek = { viewModel.seekTo(it, fromUser = true) },
                             onPlaybackAudible = viewModel::setPlaybackAudible,
                             showPauseOverlays = false,
                             onRotate = {
@@ -681,7 +707,11 @@ fun PlayerScreen(
                             onscreenText = onscreenText,
                             displaySettings = effectiveDisplay,
                             horizontalSpan = com.jianqiaofan.subtitleplayer.domain.display.OnScreenHorizontalSpan.Full,
+                            positionMs = state.positionMs,
+                            durationMs = state.durationMs,
                             onTogglePlay = viewModel::togglePlayPause,
+                            onDoubleTap = viewModel::seekToPreviousCue,
+                            onSeek = { viewModel.seekTo(it, fromUser = true) },
                             onPlaybackAudible = viewModel::setPlaybackAudible,
                             onRotate = {
                                 val next = display.preferredOrientation.toggledFrom(devicePortrait)
@@ -726,6 +756,12 @@ fun PlayerScreen(
                         onSpeed = viewModel::setSpeed,
                         onCountdown = { showCountdown = true },
                         onSleep = { showSleep = true },
+                        onscreenEnabled = effectiveDisplay.onscreenEnabled,
+                        onToggleOnScreen = viewModel::toggleOnScreenSubtitles,
+                        captionLabel = captionSelectionLabel(state.captionLanguageCode, sourceLanguage),
+                        captionChoices = captionChoices.map { it.code to it.label },
+                        onCaption = viewModel::setCaptionLanguage,
+                        translationStatus = state.translationStatus,
                         background = immersiveChrome,
                     )
                 }
@@ -875,6 +911,7 @@ fun PlayerScreen(
             immersiveAvailable = immersiveAvailable,
             immersiveUnavailableReason = immersiveReason,
             devicePortrait = devicePortrait,
+            deepSeek = state.deepSeek,
             onPreview = { settingsPreview = it },
             onShowSubtitleList = viewModel::setShowSubtitleList,
             onConfirm = { next ->
@@ -882,6 +919,7 @@ fun PlayerScreen(
                 settingsPreview = null
                 showSettings = false
             },
+            onSaveDeepSeek = viewModel::saveDeepSeek,
             onDismiss = {
                 settingsPreview = null
                 showSettings = false
@@ -907,6 +945,12 @@ fun PlayerScreen(
             initialTags = if (single) entry?.tags.orEmpty() else emptyList(),
             initialNote = if (single) entry?.note.orEmpty() else "",
             customNames = state.customTagNames,
+            dialogTitle = if (single) null else "追加标签",
+            description = if (single) {
+                null
+            } else {
+                "给所选 ${editing.size} 条字幕加上勾选的标签。各条原来的标签会保留。"
+            },
             onDismiss = { tagEditIndices = null },
             onConfirm = { tags, note, applyNote ->
                 viewModel.applyTags(
@@ -915,6 +959,7 @@ fun PlayerScreen(
                         tags = tags,
                         note = note,
                         applyNote = applyNote,
+                        append = !single,
                     ),
                 )
                 tagEditIndices = null
@@ -1044,7 +1089,11 @@ private fun VideoPane(
     onscreenText: String?,
     displaySettings: com.jianqiaofan.subtitleplayer.domain.display.PlayerDisplaySettings,
     horizontalSpan: com.jianqiaofan.subtitleplayer.domain.display.OnScreenHorizontalSpan,
+    positionMs: Long,
+    durationMs: Long,
     onTogglePlay: () -> Unit,
+    onDoubleTap: () -> Unit,
+    onSeek: (Long) -> Unit,
     onPlaybackAudible: (Boolean) -> Unit,
     showPauseOverlays: Boolean = true,
     onRotate: () -> Unit,
@@ -1054,13 +1103,20 @@ private fun VideoPane(
     var viewportWidth by remember { mutableFloatStateOf(0f) }
     var viewportHeight by remember { mutableFloatStateOf(0f) }
     val onTapAction by rememberUpdatedState(newValue = onTogglePlay)
+    val onDoubleTapAction by rememberUpdatedState(newValue = onDoubleTap)
+    val onSeekAction by rememberUpdatedState(newValue = onSeek)
+    val positionMsState by rememberUpdatedState(newValue = positionMs)
+    val durationMsState by rememberUpdatedState(newValue = durationMs)
     val onAudible by rememberUpdatedState(newValue = onPlaybackAudible)
+    val scope = rememberCoroutineScope()
+    val pendingTap = remember { PendingVideoTap() }
     val context = LocalContext.current
     val audioManager = remember(context) {
         context.getSystemService(android.media.AudioManager::class.java)
     }
     var levelHud by remember { mutableStateOf<String?>(null) }
     var levelHudHolding by remember { mutableStateOf(false) }
+    var seekAnchorMs by remember { mutableStateOf(0L) }
     LaunchedEffect(levelHudHolding, levelHud) {
         if (levelHudHolding || levelHud == null) return@LaunchedEffect
         delay(700)
@@ -1168,11 +1224,26 @@ private fun VideoPane(
                 .pointerInput(isAudio) {
                     detectVideoViewportGestures(
                         canPan = { !isAudio && viewport.scale > VIDEO_MIN_SCALE + 0.01f },
-                        onTap = { onTapAction() },
+                        onTap = {
+                            val existing = pendingTap.job
+                            if (existing != null && existing.isActive) {
+                                existing.cancel()
+                                pendingTap.job = null
+                                onDoubleTapAction()
+                            } else {
+                                pendingTap.job = scope.launch {
+                                    delay(VIDEO_DOUBLE_TAP_TIMEOUT_MS)
+                                    pendingTap.job = null
+                                    onTapAction()
+                                }
+                            }
+                        },
                         onGesture = { centroid, pan, zoom ->
                             applyGesture(centroid.x, centroid.y, pan.x, pan.y, zoom)
                         },
                         onLevelDragStart = { side ->
+                            pendingTap.job?.cancel()
+                            pendingTap.job = null
                             levelHudHolding = true
                             if (side == ScreenHalf.Left) readBrightness() else readVolume()
                         },
@@ -1181,6 +1252,25 @@ private fun VideoPane(
                             if (side == ScreenHalf.Left) applyBrightness(level) else applyVolume(level)
                         },
                         onLevelDragEnd = { levelHudHolding = false },
+                        onSeekDragStart = {
+                            pendingTap.job?.cancel()
+                            pendingTap.job = null
+                            levelHudHolding = true
+                            seekAnchorMs = positionMsState
+                            SeekDragSession(anchorMs = positionMsState, durationMs = durationMsState)
+                        },
+                        onSeekDrag = { previewMs ->
+                            levelHud = formatSeekHud(previewMs, durationMsState, seekAnchorMs)
+                        },
+                        onSeekDragEnd = { targetMs ->
+                            levelHudHolding = false
+                            levelHud = formatSeekHud(targetMs, durationMsState, seekAnchorMs)
+                            onSeekAction(targetMs)
+                        },
+                        onSeekDragCancel = {
+                            levelHudHolding = false
+                            levelHud = null
+                        },
                     )
                 },
         )
@@ -1230,7 +1320,7 @@ private fun VideoPane(
                 IconButton(onClick = onSubtitleSettings) {
                     Icon(
                         Icons.Filled.Subtitles,
-                        contentDescription = "画面字幕",
+                        contentDescription = "字幕设置",
                         tint = Color.White,
                     )
                 }
@@ -1256,6 +1346,12 @@ private fun PlayerControlsBar(
     onSpeed: (Float) -> Unit,
     onCountdown: () -> Unit,
     onSleep: () -> Unit,
+    onscreenEnabled: Boolean,
+    onToggleOnScreen: () -> Unit,
+    captionLabel: String,
+    captionChoices: List<Pair<String, String>>,
+    onCaption: (String) -> Unit,
+    translationStatus: String?,
     background: Color = SurfacePanel,
 ) {
     var slider by remember { mutableFloatStateOf(positionMs.toFloat()) }
@@ -1264,24 +1360,36 @@ private fun PlayerControlsBar(
         if (!dragging) slider = positionMs.toFloat()
     }
     val max = durationMs.coerceAtLeast(1L).toFloat()
+    var captionMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(onscreenEnabled) {
+        if (!onscreenEnabled) captionMenu = false
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(background)
             .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        Slider(
-            value = slider.coerceIn(0f, max),
-            onValueChange = {
-                dragging = true
-                slider = it
-            },
-            onValueChangeFinished = {
-                dragging = false
-                onSeek(slider.toLong())
-            },
-            valueRange = 0f..max,
-        )
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Slider(
+                value = slider.coerceIn(0f, max),
+                onValueChange = {
+                    dragging = true
+                    slider = it
+                },
+                onValueChangeFinished = {
+                    dragging = false
+                    onSeek(slider.toLong())
+                },
+                valueRange = 0f..max,
+                modifier = Modifier
+                    .fillMaxWidth(0.5f)
+                    .alpha(0.7f),
+            )
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -1315,6 +1423,25 @@ private fun PlayerControlsBar(
                 Icon(Icons.Filled.Timer, contentDescription = "学习倒计时", modifier = Modifier.size(18.dp))
                 Text(countdownLabel, modifier = Modifier.padding(start = 4.dp))
             }
+            TextButton(onClick = onToggleOnScreen) {
+                Text(if (onscreenEnabled) "显示字幕" else "隐藏字幕")
+            }
+            Box {
+                TextButton(onClick = { captionMenu = true }, enabled = onscreenEnabled) {
+                    Text(captionLabel)
+                }
+                DropdownMenu(expanded = captionMenu, onDismissRequest = { captionMenu = false }) {
+                    captionChoices.forEach { (code, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = {
+                                onCaption(code)
+                                captionMenu = false
+                            },
+                        )
+                    }
+                }
+            }
             TextButton(onClick = onSleep) {
                 Icon(Icons.Filled.Bedtime, contentDescription = "定时关闭", modifier = Modifier.size(18.dp))
                 Text(sleepLabel, modifier = Modifier.padding(start = 4.dp))
@@ -1325,6 +1452,14 @@ private fun PlayerControlsBar(
                     contentDescription = if (muted) "取消静音" else "静音",
                 )
             }
+        }
+        if (!translationStatus.isNullOrBlank()) {
+            Text(
+                text = translationStatus,
+                style = MaterialTheme.typography.labelMedium,
+                color = OnDarkMuted,
+                modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
+            )
         }
     }
 }
@@ -1398,6 +1533,13 @@ fun SplitPaneLayout(
             }
         }
     }
+}
+
+/** Wait this long after a single tap before toggling play, so a second tap can mean "previous cue". */
+private const val VIDEO_DOUBLE_TAP_TIMEOUT_MS = 280L
+
+private class PendingVideoTap {
+    var job: Job? = null
 }
 
 private sealed class ScreenshotEditSession {

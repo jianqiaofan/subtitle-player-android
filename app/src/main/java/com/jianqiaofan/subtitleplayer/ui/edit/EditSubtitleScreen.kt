@@ -44,6 +44,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
+import com.jianqiaofan.subtitleplayer.domain.subtitle.SubtitleLanguage
+import com.jianqiaofan.subtitleplayer.domain.subtitle.composeCueBody
+import com.jianqiaofan.subtitleplayer.domain.subtitle.parseCueBody
+import com.jianqiaofan.subtitleplayer.domain.subtitle.translationFieldsForEdit
 import com.jianqiaofan.subtitleplayer.domain.time.EditConfirmResult
 import com.jianqiaofan.subtitleplayer.domain.time.TimeFields
 import com.jianqiaofan.subtitleplayer.domain.time.TimePart
@@ -66,13 +70,21 @@ private data class FocusedField(val isStart: Boolean, val part: TimePart)
 fun EditSubtitleScreen(
     cue: SubtitleCue,
     writable: Boolean,
+    translationTarget: SubtitleLanguage?,
     onSave: (start: Double, end: Double, text: String) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val parsed = remember(cue) { parseCueBody(cue.text) }
+    val translationRows = remember(cue, translationTarget) {
+        translationFieldsForEdit(cue.text, translationTarget)
+    }
     var start by remember(cue) { mutableStateOf(secondsToTimeFields(cue.start)) }
     var end by remember(cue) { mutableStateOf(secondsToTimeFields(cue.end)) }
-    var text by remember(cue) { mutableStateOf(cue.text) }
+    val initialStart = remember(cue) { secondsToTimeFields(cue.start) }
+    val initialEnd = remember(cue) { secondsToTimeFields(cue.end) }
+    var original by remember(cue) { mutableStateOf(parsed.original) }
+    var translations by remember(cue, translationTarget) { mutableStateOf(translationRows.toMap()) }
     var focused by remember { mutableStateOf<FocusedField?>(FocusedField(true, TimePart.Second)) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -155,13 +167,23 @@ fun EditSubtitleScreen(
                 onNudgeSecond = { delta -> applyNudge(TimePart.Second, delta, false) },
             )
             OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
+                value = original,
+                onValueChange = { original = it },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(160.dp),
-                label = { Text("字幕内容") },
+                    .height(140.dp),
+                label = { Text("原文") },
             )
+            translationRows.forEach { (language, _) ->
+                OutlinedTextField(
+                    value = translations[language].orEmpty(),
+                    onValueChange = { translations = translations + (language to it) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp),
+                    label = { Text("${language.label}译文") },
+                )
+            }
             Text(
                 text = "若起始时间不早于终止时间，终止时间将自动调整为起始时间 +1 秒。",
                 style = MaterialTheme.typography.bodySmall,
@@ -181,7 +203,15 @@ fun EditSubtitleScreen(
                                 if (!writable) {
                                     scope.launch { snackbar.showSnackbar("当前目录没有写权限，无法保存") }
                                 } else {
-                                    onSave(result.start, result.end, text)
+                                    val composed = composeCueBody(original, translations)
+                                    val composedBody = parseCueBody(composed)
+                                    val sameBody = composedBody.original == parsed.original &&
+                                        composedBody.translations == parsed.translations
+                                    if (start == initialStart && end == initialEnd && sameBody) {
+                                        onCancel()
+                                    } else {
+                                        onSave(result.start, result.end, if (sameBody) cue.text else composed)
+                                    }
                                 }
                             }
                         }

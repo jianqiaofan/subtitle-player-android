@@ -1,6 +1,7 @@
 package com.jianqiaofan.subtitleplayer.domain.timeline
 
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleOriginal
 import com.jianqiaofan.subtitleplayer.domain.model.mediaStem
 import com.jianqiaofan.subtitleplayer.domain.tags.TagEntry
 import com.jianqiaofan.subtitleplayer.domain.tags.orderedTagNames
@@ -94,7 +95,7 @@ fun rehomeTimelineTags(
                 index = cue.index,
                 start = cue.start,
                 end = cue.end,
-                text = cue.text,
+                text = subtitleOriginal(cue.text),
                 tags = orderedTagNames(visible),
             )
             subtitle += attached

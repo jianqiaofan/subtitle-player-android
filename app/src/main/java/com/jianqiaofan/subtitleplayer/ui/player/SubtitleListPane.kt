@@ -51,6 +51,7 @@ import com.jianqiaofan.subtitleplayer.domain.display.SubtitleListDensity
 import com.jianqiaofan.subtitleplayer.domain.display.formatCueListBody
 import com.jianqiaofan.subtitleplayer.domain.display.joinSelectedCueTexts
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleOriginal
 import com.jianqiaofan.subtitleplayer.domain.subtitle.formatCueListHeader
 import com.jianqiaofan.subtitleplayer.domain.tags.TagEntry
 import com.jianqiaofan.subtitleplayer.domain.tags.TagListFilter
@@ -177,7 +178,7 @@ fun SubtitleListPane(
                         TextButton(
                             onClick = { onTag(selectedIndices.toList()); onExitSelection() },
                             enabled = selectedIndices.isNotEmpty(),
-                        ) { Text("标签") }
+                        ) { Text(if (selectedIndices.size > 1) "追加标签" else "标签") }
                         TextButton(
                             onClick = { onClearTags(selectedIndices.toList()); onExitSelection() },
                             enabled = selectedIndices.isNotEmpty(),
@@ -288,7 +289,7 @@ fun SubtitleListPane(
                                 onNoteClick = { onNoteClick(index) },
                                 onRepeat = { onRepeat(index); onMenuIndexChange(null) },
                                 onCopy = {
-                                    clipboard.setText(AnnotatedString(cue.text))
+                                    clipboard.setText(AnnotatedString(subtitleOriginal(cue.text)))
                                     onMenuIndexChange(null)
                                 },
                                 allowEdit = allowEdit,
@@ -485,7 +486,7 @@ private fun CueRow(
                             TagChips(tags)
                         }
                         Text(
-                            text = cue.text.replace("\n", " / "),
+                            text = subtitleOriginal(cue.text).replace("\n", " / "),
                             style = MaterialTheme.typography.bodyMedium,
                             color = bodyColor,
                         )

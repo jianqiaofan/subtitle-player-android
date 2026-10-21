@@ -15,6 +15,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import com.jianqiaofan.subtitleplayer.data.AppPreferences
+import com.jianqiaofan.subtitleplayer.data.DeepSeekClient
 import com.jianqiaofan.subtitleplayer.data.CloudRepository
 import com.jianqiaofan.subtitleplayer.data.DeviceNetwork
 import com.jianqiaofan.subtitleplayer.data.ManagedScreenshot
@@ -58,11 +59,29 @@ import com.jianqiaofan.subtitleplayer.domain.playbacklog.newPlaybackSessionId
 import com.jianqiaofan.subtitleplayer.domain.playbacklog.sessionsForAccount
 import com.jianqiaofan.subtitleplayer.domain.playbacklog.sessionsToUpload
 import com.jianqiaofan.subtitleplayer.domain.playbacklog.studyTotalMillis
+import com.jianqiaofan.subtitleplayer.domain.subtitle.TRANSLATION_STATUS_NOT_WRITTEN
+import com.jianqiaofan.subtitleplayer.domain.subtitle.TRANSLATION_STATUS_UNCONFIGURED
+import com.jianqiaofan.subtitleplayer.domain.subtitle.TranslationRequestLine
+import com.jianqiaofan.subtitleplayer.domain.subtitle.activeTranslationLanguage
+import com.jianqiaofan.subtitleplayer.domain.subtitle.applyTranslations
+import com.jianqiaofan.subtitleplayer.domain.subtitle.cueNeedsTranslation
+import com.jianqiaofan.subtitleplayer.domain.subtitle.cuesToTranslate
+import com.jianqiaofan.subtitleplayer.domain.subtitle.detectSourceLanguage
+import com.jianqiaofan.subtitleplayer.domain.subtitle.requestTranslations
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleLanguageByCode
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleOriginal
+import com.jianqiaofan.subtitleplayer.domain.subtitle.translationFailureStatus
+import com.jianqiaofan.subtitleplayer.domain.subtitle.translationStartIndex
+import com.jianqiaofan.subtitleplayer.domain.subtitle.translatingStatus
+import com.jianqiaofan.subtitleplayer.domain.subtitle.DeepSeekConfig
+import com.jianqiaofan.subtitleplayer.domain.subtitle.SubtitleLanguage
+import com.jianqiaofan.subtitleplayer.domain.subtitle.isDeepSeekConfigured
 import com.jianqiaofan.subtitleplayer.domain.subtitle.autoSelectTrack
 import com.jianqiaofan.subtitleplayer.domain.subtitle.effectiveRepeatEnd
 import com.jianqiaofan.subtitleplayer.domain.subtitle.findCueIndexAtTime
 import com.jianqiaofan.subtitleplayer.domain.subtitle.findSubtitlesForMedia
 import com.jianqiaofan.subtitleplayer.domain.subtitle.formatCueListLine
+import com.jianqiaofan.subtitleplayer.domain.subtitle.previousCueIndex
 import com.jianqiaofan.subtitleplayer.domain.tags.TagAlignment
 import com.jianqiaofan.subtitleplayer.domain.tags.TagEdit
 import com.jianqiaofan.subtitleplayer.domain.tags.TagEntry
@@ -150,6 +169,10 @@ data class PlayerUiState(
     val studyLog: StudyLogUi? = null,
     val leavePrompt: LeaveSyncUi? = null,
     val screenshots: List<ScreenshotShot> = emptyList(),
+    val captionLanguageCode: String = com.jianqiaofan.subtitleplayer.domain.subtitle.CAPTION_ORIGINAL,
+    val sourceLanguageCode: String = SubtitleLanguage.Zh.code,
+    val translationStatus: String? = null,
+    val deepSeek: DeepSeekConfig = DeepSeekConfig(),
 )
 
 class PlayerViewModel(
@@ -164,6 +187,12 @@ class PlayerViewModel(
     private val bundles = MediaBundleFiles(application)
     private val cloud = CloudRepository(application)
     private val screenshotsRepo = ScreenshotRepository(application)
+    private val deepSeekClient = DeepSeekClient()
+    private var deepSeekConfig = DeepSeekConfig()
+    private val subtitleWriteMutex = Mutex()
+    private var translateInFlight = false
+    private var translationGeneration = 0
+    private var translationWatchRow = Int.MIN_VALUE
     private var countdownJob: Job? = null
     private var repeatJob: Job? = null
     private var repeatRange: RepeatRange? = null
@@ -263,6 +292,17 @@ class PlayerViewModel(
             }
         }
         viewModelScope.launch {
+            prefs.captionLanguage.collect { code ->
+                _state.update { it.copy(captionLanguageCode = code) }
+            }
+        }
+        viewModelScope.launch {
+            prefs.deepSeekConfig.collect { config ->
+                deepSeekConfig = config
+                _state.update { it.copy(deepSeek = config) }
+            }
+        }
+        viewModelScope.launch {
             prefs.recentMedia.collectLatest { stored ->
                 val visible = withContext(Dispatchers.IO) {
                     stored.filter { library.documentExists(Uri.parse(it.uri)) }
@@ -282,6 +322,7 @@ class PlayerViewModel(
                 if (_state.value.timelineMode && _state.value.cues.isEmpty() && dur > 0L) {
                     publishTimeline(dur)
                 }
+                notePlaybackCue()
                 delay(80)
             }
         }
@@ -299,6 +340,20 @@ class PlayerViewModel(
 
     fun setShowSubtitleList(show: Boolean) {
         _state.update { it.copy(showSubtitleList = show) }
+    }
+
+    fun toggleOnScreenSubtitles() {
+        updateDisplaySettings { it.copy(onscreenEnabled = !it.onscreenEnabled) }
+    }
+
+    fun setCaptionLanguage(code: String) {
+        _state.update { it.copy(captionLanguageCode = code) }
+        viewModelScope.launch { prefs.setCaptionLanguage(code) }
+        considerTranslation(continueRun = true)
+    }
+
+    fun saveDeepSeek(config: DeepSeekConfig) {
+        viewModelScope.launch { prefs.saveDeepSeek(config) }
     }
 
     fun setTagFilter(filter: TagListFilter) {
@@ -328,6 +383,7 @@ class PlayerViewModel(
         if (!ensureTagWritable()) return
         val previous = currentAlignment()
         val next = applyTagEdit(previous, _state.value.cues, edit)
+        if (next == previous) return
         publishAlignment(next)
         viewModelScope.launch {
             if (!persistAlignment(next, fromUser = true)) publishAlignment(previous)
@@ -444,6 +500,16 @@ class PlayerViewModel(
         cancelRepeat()
         player.seekTo((cue.start * 1000).toLong().coerceAtLeast(0L))
         startPlayback()
+    }
+
+    fun seekToPreviousCue() {
+        val snapshot = _state.value
+        val index = previousCueIndex(
+            snapshot.cues,
+            snapshot.currentCueIndex,
+            snapshot.positionMs / 1000.0,
+        ) ?: return
+        seekToCue(index)
     }
 
     fun seekToScreenshot(id: String) {
@@ -906,11 +972,13 @@ class PlayerViewModel(
         }
         val current = _state.value.cues.toMutableList()
         val existing = current.getOrNull(index) ?: return
+        if (existing.start == start && existing.end == end && existing.text == text) return
         val updated = existing.copy(start = start, end = end, text = text)
         snapshotCues = current.toList()
         val previousAlignment = currentAlignment()
         current[index] = updated
         val nextAlignment = applyCueEdit(previousAlignment, index, updated)
+        val tagsChanged = nextAlignment != previousAlignment
         val track = _state.value.selectedTrack ?: run {
             _state.update { it.copy(message = "没有可写回的字幕文件") }
             return
@@ -923,26 +991,160 @@ class PlayerViewModel(
             _state.update { it.copy(message = "不支持的字幕格式") }
             return
         }
-        _state.update { it.copy(cues = current) }
+        _state.update {
+            it.copy(cues = current, sourceLanguageCode = detectSourceLanguage(current).code)
+        }
         publishAlignment(nextAlignment)
         viewModelScope.launch {
-            val result = subtitles.writeCues(Uri.parse(track.documentUri), current, format)
-            if (result.isFailure) {
-                _state.update {
-                    it.copy(
-                        cues = snapshotCues,
-                        message = "保存失败：${result.exceptionOrNull()?.message ?: "无法写入文件"}",
-                    )
+            subtitleWriteMutex.withLock {
+                val result = subtitles.writeCues(Uri.parse(track.documentUri), current, format)
+                if (result.isFailure) {
+                    _state.update {
+                        it.copy(
+                            cues = snapshotCues,
+                            sourceLanguageCode = detectSourceLanguage(snapshotCues).code,
+                            message = "保存失败：${result.exceptionOrNull()?.message ?: "无法写入文件"}",
+                        )
+                    }
+                    publishAlignment(previousAlignment)
+                } else if (tagsChanged && !persistAlignment(nextAlignment)) {
+                    subtitles.writeCues(Uri.parse(track.documentUri), snapshotCues, format)
+                    _state.update {
+                        it.copy(
+                            cues = snapshotCues,
+                            sourceLanguageCode = detectSourceLanguage(snapshotCues).code,
+                        )
+                    }
+                    publishAlignment(previousAlignment)
+                } else {
+                    dirtySubtitles += track.fileName
+                    if (tagsChanged) dirtyTags += track.fileName
+                    _state.update { it.copy(message = "已保存") }
+                    considerTranslation(continueRun = false)
                 }
-                publishAlignment(previousAlignment)
-            } else if (!persistAlignment(nextAlignment)) {
-                subtitles.writeCues(Uri.parse(track.documentUri), snapshotCues, format)
-                _state.update { it.copy(cues = snapshotCues) }
-                publishAlignment(previousAlignment)
-            } else {
-                dirtySubtitles += track.fileName
-                dirtyTags += track.fileName
-                _state.update { it.copy(message = "已保存") }
+            }
+        }
+    }
+
+    private fun setTranslationStatus(status: String?) {
+        if (_state.value.translationStatus == status) return
+        _state.update { it.copy(translationStatus = status) }
+    }
+
+    private fun invalidateTranslation() {
+        translationGeneration++
+        translateInFlight = false
+        translationWatchRow = Int.MIN_VALUE
+        setTranslationStatus(null)
+    }
+
+    private fun notePlaybackCue() {
+        val snapshot = _state.value
+        if (snapshot.timelineMode || snapshot.cues.isEmpty()) return
+        val seconds = snapshot.positionMs / 1000.0
+        val row = findCueIndexAtTime(snapshot.cues, seconds)
+        val cue = snapshot.cues.getOrNull(row)
+        val cueRow = if (cue != null && cue.start <= seconds && seconds <= cue.end) row else -1
+        if (cueRow == translationWatchRow) return
+        translationWatchRow = cueRow
+        if (cueRow >= 0) considerTranslation(continueRun = false)
+    }
+
+    private fun considerTranslation(continueRun: Boolean) {
+        if (translateInFlight) return
+        val snapshot = _state.value
+        val currentTrack = snapshot.selectedTrack
+        val source = subtitleLanguageByCode(snapshot.sourceLanguageCode) ?: SubtitleLanguage.Zh
+        val target = activeTranslationLanguage(snapshot.captionLanguageCode, source)
+        val format = currentTrack?.fileName?.let { subtitleFormatOf(it) }
+        val timeline = snapshot.timelineMode ||
+            (currentTrack != null && isTimelineSubtitleFile(resolvedMediaName, currentTrack.fileName))
+        if (target == null || timeline || currentTrack == null || format == null || snapshot.cues.isEmpty()) {
+            setTranslationStatus(null)
+            return
+        }
+        val seconds = snapshot.positionMs / 1000.0
+        if (!continueRun) {
+            val row = findCueIndexAtTime(snapshot.cues, seconds)
+            val cue = snapshot.cues.getOrNull(row)
+            val inside = cue != null && cue.start <= seconds && seconds <= cue.end
+            if (!inside || !cueNeedsTranslation(cue.text, target)) return
+        }
+        if (!snapshot.writable) return
+        if (!isDeepSeekConfigured(deepSeekConfig)) {
+            setTranslationStatus(TRANSLATION_STATUS_UNCONFIGURED)
+            return
+        }
+        val start = translationStartIndex(snapshot.cues, seconds)
+        if (start == null) {
+            setTranslationStatus(null)
+            return
+        }
+        val picked = cuesToTranslate(snapshot.cues, start, target)
+        if (picked.isEmpty()) {
+            setTranslationStatus(null)
+            return
+        }
+        val lines = picked.map { index ->
+            TranslationRequestLine(
+                cueIndex = snapshot.cues[index].index,
+                listIndex = index,
+                original = subtitleOriginal(snapshot.cues[index].text),
+            )
+        }
+        val trackUri = currentTrack.documentUri
+        val fileName = currentTrack.fileName
+        val config = deepSeekConfig
+        val job = ++translationGeneration
+        translateInFlight = true
+        setTranslationStatus(translatingStatus(lines.size))
+        viewModelScope.launch {
+            var failedMessage: String? = null
+            var written = 0
+            try {
+                val returned = withContext(Dispatchers.IO) {
+                    requestTranslations(lines, target) { system, user ->
+                        deepSeekClient.complete(config, system, user)
+                    }
+                }
+                if (job != translationGeneration) return@launch
+                subtitleWriteMutex.withLock {
+                    if (job != translationGeneration) return@withLock
+                    val sameTrack = _state.value.selectedTrack?.documentUri == trackUri
+                    if (!sameTrack) return@withLock
+                    val result = applyTranslations(_state.value.cues, target, lines, returned)
+                    if (result.written > 0) {
+                        val write = withContext(Dispatchers.IO) {
+                            subtitles.writeCues(Uri.parse(trackUri), result.cues, format)
+                        }
+                        if (write.isFailure) {
+                            failedMessage = write.exceptionOrNull()?.message ?: "无法写入字幕"
+                        } else {
+                            written = result.written
+                            _state.update {
+                                it.copy(
+                                    cues = result.cues,
+                                    sourceLanguageCode = detectSourceLanguage(result.cues).code,
+                                )
+                            }
+                            dirtySubtitles += fileName
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failedMessage = e.message
+            } finally {
+                if (job == translationGeneration && isActive) {
+                    translateInFlight = false
+                    val failure = failedMessage
+                    when {
+                        failure != null -> setTranslationStatus(translationFailureStatus(failure))
+                        written == 0 -> setTranslationStatus(TRANSLATION_STATUS_NOT_WRITTEN)
+                        else -> considerTranslation(continueRun = true)
+                    }
+                }
             }
         }
     }
@@ -1049,7 +1251,14 @@ class PlayerViewModel(
                 val format = subtitleFormatOf(track.fileName) ?: continue
                 val cues = subtitles.readCues(Uri.parse(track.documentUri), format)
                 if (cues.isNotEmpty()) {
-                    _state.update { it.copy(selectedTrack = track, cues = cues, timelineMode = false) }
+                    _state.update {
+                        it.copy(
+                            selectedTrack = track,
+                            cues = cues,
+                            sourceLanguageCode = detectSourceLanguage(cues).code,
+                            timelineMode = false,
+                        )
+                    }
                     loadTags(track, cues, resetFilter = true)
                     rehomeTimelineOnto(track, cues)
                     loadedReal = true
@@ -1116,6 +1325,7 @@ class PlayerViewModel(
     }
 
     private suspend fun loadTrack(track: SubtitleTrack) {
+        invalidateTranslation()
         val format = subtitleFormatOf(track.fileName)
         if (format == null) {
             _state.update { it.copy(selectedTrack = track, cues = emptyList(), message = "不支持的字幕格式") }
@@ -1133,9 +1343,18 @@ class PlayerViewModel(
             }
             return
         }
-        _state.update { it.copy(selectedTrack = track, cues = cues, message = null, timelineMode = false) }
+        _state.update {
+            it.copy(
+                selectedTrack = track,
+                cues = cues,
+                sourceLanguageCode = detectSourceLanguage(cues).code,
+                message = null,
+                timelineMode = false,
+            )
+        }
         loadTags(track, cues, resetFilter = true)
         rehomeTimelineOnto(track, cues)
+        considerTranslation(continueRun = false)
     }
 
     private suspend fun loadTags(track: SubtitleTrack, cues: List<SubtitleCue>, resetFilter: Boolean) {
@@ -1239,6 +1458,7 @@ class PlayerViewModel(
     }
 
     private suspend fun enterTimeline() {
+        invalidateTranslation()
         val fileName = timelineSubtitleFileName(mediaStem(resolvedMediaName))
         timelineHiddenEntries = emptyList()
         _state.update {
@@ -1273,7 +1493,7 @@ class PlayerViewModel(
         val document = readTimelineDocument()
         val (attached, hidden) = alignTimelineTags(cues, document?.entries.orEmpty())
         timelineHiddenEntries = hidden
-        _state.update { it.copy(timelineStepSec = step, cues = cues, message = null) }
+        _state.update { it.copy(timelineStepSec = step, cues = cues, sourceLanguageCode = detectSourceLanguage(cues).code, message = null) }
         publishAlignment(com.jianqiaofan.subtitleplayer.domain.tags.TagAlignment(attached), com.jianqiaofan.subtitleplayer.domain.tags.TagListFilter())
     }
 

@@ -1,6 +1,7 @@
 package com.jianqiaofan.subtitleplayer.domain.display
 
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleOriginal
 
 enum class OnScreenSubtitlePosition {
     Top,
@@ -205,7 +206,7 @@ fun parseColorArgb(hex: String, fallback: Long = 0xFFFFFFFF): Long {
 }
 
 /** Compact list line: body only; keep original newlines for multi-line display. */
-fun formatCueListBody(cue: SubtitleCue): String = cue.text
+fun formatCueListBody(cue: SubtitleCue): String = subtitleOriginal(cue.text)
 
 data class OnScreenHorizontalSpan(
     val startFraction: Float,
@@ -239,5 +240,5 @@ fun onScreenHorizontalSpan(
 
 fun joinSelectedCueTexts(cues: List<SubtitleCue>, indices: Collection<Int>): String =
     indices.sorted()
-        .mapNotNull { cues.getOrNull(it)?.text }
+        .mapNotNull { cues.getOrNull(it)?.let { cue -> subtitleOriginal(cue.text) } }
         .joinToString("\n")

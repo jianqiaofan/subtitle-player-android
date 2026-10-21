@@ -7,6 +7,7 @@ import com.jianqiaofan.subtitleplayer.domain.json.jsonString
 import com.jianqiaofan.subtitleplayer.domain.json.parseJson
 import com.jianqiaofan.subtitleplayer.domain.json.str
 import com.jianqiaofan.subtitleplayer.domain.model.SubtitleCue
+import com.jianqiaofan.subtitleplayer.domain.subtitle.subtitleOriginal
 import com.jianqiaofan.subtitleplayer.domain.subtitle.findCueIndexAtTime
 import com.jianqiaofan.subtitleplayer.domain.subtitle.formatClock
 import com.jianqiaofan.subtitleplayer.domain.tags.SubtitleListRow
@@ -359,7 +360,9 @@ fun nearbyCuesAroundTime(
     before: Int = NOTE_CUE_PICK_BEFORE,
     after: Int = NOTE_CUE_PICK_AFTER,
 ): NearbyCueWindow {
-    val nonempty = cues.filter { it.text.trim().isNotEmpty() }
+    val nonempty = cues
+        .map { it.copy(text = subtitleOriginal(it.text)) }
+        .filter { it.text.trim().isNotEmpty() }
     if (nonempty.isEmpty()) return NearbyCueWindow(emptyList(), null)
     val center = findCueIndexAtTime(nonempty, timeSec).coerceIn(0, nonempty.lastIndex)
     val from = (center - before).coerceAtLeast(0)
